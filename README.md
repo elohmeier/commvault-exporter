@@ -1,5 +1,12 @@
 # commvault-exporter
 
+[![CI](https://github.com/elohmeier/commvault-exporter/actions/workflows/ci.yml/badge.svg)](https://github.com/elohmeier/commvault-exporter/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/elohmeier/commvault-exporter)](https://github.com/elohmeier/commvault-exporter/releases)
+[![GHCR](https://img.shields.io/badge/ghcr.io-commvault--exporter-blue)](https://github.com/users/elohmeier/packages/container/package/commvault-exporter)
+[![Go Report Card](https://goreportcard.com/badge/github.com/elohmeier/commvault-exporter)](https://goreportcard.com/report/github.com/elohmeier/commvault-exporter)
+[![Go Reference](https://pkg.go.dev/badge/github.com/elohmeier/commvault-exporter.svg)](https://pkg.go.dev/github.com/elohmeier/commvault-exporter)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 Prometheus exporter for Commvault Backup and Recovery / CommCell REST APIs.
 
 The exporter logs in to Commvault, refreshes data in the background, and serves
