@@ -50,7 +50,6 @@ func Default() Config {
 			SLA:               "/CustomReportsEngine/rest/reportsplusengine/datasets/GetSLACounts/data?cache=true&parameter.i_DashboardType=commcell&datasource=2",
 			Jobs24h:           "/CustomReportsEngine/rest/reportsplusengine/datasets/075e703a-b29f-46d6-ad29-7c1a60f7e4f3/data",
 			HealthOverview:    "/CustomReportsEngine/rest/reportsplusengine/datasets/b50b20ed-5fc4-4b4c-f7c4-fc6b84eb35cc/data",
-			Environment:       "/CustomReportsEngine/rest/reportsplusengine/datasets/d0a73c45-b06d-4358-8d7e-d55d428ba75c/data",
 			CurrentCapacity:   "/CustomReportsEngine/rest/reportsplusengine/datasets/d7faef75-cf66-40a2-98ce-a2d0cc2a144b:feabb5ca-b6b7-4572-b0cb-39352c7e1b67/data/?offset=0&limit=5&rawData=false",
 			StorageSpaceUsage: "/CustomReportsEngine/rest/reportsplusengine/datasets/2b366703-52e1-4775-8047-1f4cfa13d2db/data",
 		},

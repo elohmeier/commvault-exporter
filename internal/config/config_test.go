@@ -57,12 +57,14 @@ func TestDefaultReportPathsAndJobWindow(t *testing.T) {
 		"SLA":               cfg.Paths.SLA,
 		"Jobs24h":           cfg.Paths.Jobs24h,
 		"HealthOverview":    cfg.Paths.HealthOverview,
-		"Environment":       cfg.Paths.Environment,
 		"CurrentCapacity":   cfg.Paths.CurrentCapacity,
 		"StorageSpaceUsage": cfg.Paths.StorageSpaceUsage,
 	} {
 		if !strings.HasPrefix(path, "/CustomReportsEngine/rest/reportsplusengine/datasets/") {
 			t.Fatalf("%s path = %q, want documented report engine path", name, path)
 		}
+	}
+	if cfg.Paths.Environment != "" {
+		t.Fatalf("Environment path = %q, want no default", cfg.Paths.Environment)
 	}
 }

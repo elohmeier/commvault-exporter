@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -70,6 +71,82 @@ commvault_vm_status{guid="guid-1",status="1",status_name="protected",vm="vm-1"} 
 `
 	if err := testutil.GatherAndCompare(reg, strings.NewReader(expected), "commvault_vm_status", "commvault_vm_last_backup_start_time_seconds", "commvault_vm_last_backup_end_time_seconds"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestExporterSkipsEnvironmentReportWhenNoEndpointConfigured(t *testing.T) {
+	var environmentRequests int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/reports/commcell":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"columns": []map[string]any{
+					{"name": "CommCellName"},
+					{"name": "Version"},
+					{"name": "ReleaseName"},
+				},
+				"records": [][]any{{"commcell-a", "11.42", "2024E"}},
+			})
+		case "/reports/sla":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"columns": []map[string]any{
+					{"name": "Data Source"},
+					{"name": "SLAStatus"},
+					{"name": "CurrentCount"},
+				},
+				"records": [][]any{{"commcell-a", "Met SLA", 1}},
+			})
+		case "/reports/jobs-24h":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"columns": []map[string]any{
+					{"name": "Data Source"},
+					{"name": "Name"},
+					{"name": "CurrentCount"},
+				},
+				"records": [][]any{{"commcell-a", "Completed", 1}},
+			})
+		case "/reports/health":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"columns": []map[string]any{
+					{"name": "Data Source"},
+					{"name": "Status"},
+					{"name": "Count"},
+				},
+				"records": [][]any{{"commcell-a", "1_Good", 1}},
+			})
+		case "/reports/environment":
+			atomic.AddInt32(&environmentRequests, 1)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"columns": []any{},
+				"records": []any{},
+				"failures": map[string]any{
+					"CacheDB": []any{"Bad Request. Please check the parameters."},
+				},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client, err := commvault.NewClient(commvault.Config{BaseURL: server.URL, AuthToken: "token", PageSize: 1000, Timeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.RefreshTimeout = time.Second
+	cfg.DisabledModules = []string{"vm", "jobs", "alerts", "storage"}
+	cfg.Paths.CommcellDetails = "/reports/commcell"
+	cfg.Paths.SLA = "/reports/sla"
+	cfg.Paths.Jobs24h = "/reports/jobs-24h"
+	cfg.Paths.HealthOverview = "/reports/health"
+	cfg.Paths.Environment = ""
+	exporter := New(cfg, client, slog.Default())
+	if err := exporter.RefreshOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := atomic.LoadInt32(&environmentRequests); got != 0 {
+		t.Fatalf("environment report requests = %d, want 0", got)
 	}
 }
 

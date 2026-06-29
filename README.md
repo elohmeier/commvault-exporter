@@ -55,3 +55,8 @@ publishes some of them as report dataset paths. Override them with:
 `COMMVAULT_ENDPOINT_JOBS_24H`, `COMMVAULT_ENDPOINT_HEALTH_OVERVIEW`,
 `COMMVAULT_ENDPOINT_ENVIRONMENT`, `COMMVAULT_ENDPOINT_CURRENT_CAPACITY`, and
 `COMMVAULT_ENDPOINT_STORAGE_SPACE_USAGE`.
+
+`COMMVAULT_ENDPOINT_ENVIRONMENT` has no built-in default because the observed
+Commvault environment dataset returns a report-engine `CacheDB` bad-request
+failure. The environment entity-count metrics are collected only when this
+variable points to a working dataset.

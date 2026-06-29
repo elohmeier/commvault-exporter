@@ -53,7 +53,9 @@ func (e *Exporter) collectDashboard(ctx context.Context) error {
 		e.runSubcollector(ctx, "dashboard", "sla", e.collectSLA),
 		e.runSubcollector(ctx, "dashboard", "jobs_24h", e.collectJobs24h),
 		e.runSubcollector(ctx, "dashboard", "health_overview", e.collectHealth),
-		e.runSubcollector(ctx, "dashboard", "environment", e.collectEnvironment),
+	}
+	if e.cfg.Paths.Environment != "" {
+		errs = append(errs, e.runSubcollector(ctx, "dashboard", "environment", e.collectEnvironment))
 	}
 	return errors.Join(errs...)
 }
@@ -111,6 +113,9 @@ func (e *Exporter) collectHealth(ctx context.Context) error {
 }
 
 func (e *Exporter) collectEnvironment(ctx context.Context) error {
+	if e.cfg.Paths.Environment == "" {
+		return nil
+	}
 	resp, err := e.client.GetTabular(ctx, e.cfg.Paths.Environment)
 	if err != nil {
 		return err
