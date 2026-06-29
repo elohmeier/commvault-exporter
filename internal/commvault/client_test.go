@@ -222,6 +222,73 @@ func TestAPIURLSupportsCommandCenterAndRawPaths(t *testing.T) {
 	}
 }
 
+func TestClientGetTabularReportsDatasetFailures(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/CustomReportsEngine/rest/reportsplusengine/datasets/environment/data" {
+			t.Fatalf("path = %s", r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"columns":          []any{},
+			"records":          []any{},
+			"recordsCount":     0,
+			"totalRecordCount": 0,
+			"failures": map[string]any{
+				"CacheDB": []any{"Bad Request. Please check the parameters."},
+			},
+			"warnings": map[string]any{},
+		})
+	}))
+	defer server.Close()
+
+	client, err := NewClient(Config{BaseURL: server.URL, AuthToken: "token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.GetTabular(context.Background(), "/CustomReportsEngine/rest/reportsplusengine/datasets/environment/data")
+	if err == nil {
+		t.Fatal("GetTabular error = nil")
+	}
+	for _, want := range []string{
+		"returned failures",
+		"CacheDB",
+		"Bad Request",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("GetTabular error = %q, want substring %q", err.Error(), want)
+		}
+	}
+}
+
+func TestClientGetTabularAllowsWarnings(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"columns": []map[string]any{{"name": "Dial"}},
+			"records": [][]any{
+				{"Backup and Recovery"},
+			},
+			"recordsCount":     1,
+			"totalRecordCount": 1,
+			"failures":         map[string]any{},
+			"warnings": map[string]any{
+				"dasi-prod-ac4-1": []any{"Warning: Null value is eliminated by an aggregate or other SET operation."},
+			},
+		})
+	}))
+	defer server.Close()
+
+	client, err := NewClient(Config{BaseURL: server.URL, AuthToken: "token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := client.GetTabular(context.Background(), "/report")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.RecordsCount != 1 || len(resp.Warnings) != 1 {
+		t.Fatalf("GetTabular response = %#v", resp)
+	}
+}
+
 func TestClientBearerAuthMode(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("Authorization"); got != "Bearer token" {

@@ -502,8 +502,12 @@ func statusName(code int) string {
 		return "backed_up_with_error"
 	case 5:
 		return "discovered"
+	case 7:
+		return "backed_up_with_warning"
+	case 8:
+		return "deleted"
 	default:
-		return "unknown"
+		return fmt.Sprintf("status_%d", code)
 	}
 }
 

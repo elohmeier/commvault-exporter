@@ -129,3 +129,19 @@ commvault_storage_pool_info{client_group="group-a",pool="pool-a",pool_id="42",st
 		t.Fatal(err)
 	}
 }
+
+func TestStatusNameObservedCodes(t *testing.T) {
+	tests := map[int]string{
+		1:  "protected",
+		2:  "not_protected",
+		5:  "discovered",
+		7:  "backed_up_with_warning",
+		8:  "deleted",
+		42: "status_42",
+	}
+	for code, want := range tests {
+		if got := statusName(code); got != want {
+			t.Fatalf("statusName(%d) = %q, want %q", code, got, want)
+		}
+	}
+}

@@ -63,6 +63,19 @@ func (e APIError) Error() string {
 	return fmt.Sprintf("commvault api status=%d body=%s", e.StatusCode, e.Body)
 }
 
+type TabularFailureError struct {
+	Endpoint string
+	Failures map[string]any
+}
+
+func (e TabularFailureError) Error() string {
+	data, err := json.Marshal(e.Failures)
+	if err != nil {
+		return fmt.Sprintf("commvault tabular endpoint %s returned failures", e.Endpoint)
+	}
+	return fmt.Sprintf("commvault tabular endpoint %s returned failures: %s", e.Endpoint, data)
+}
+
 func NewClient(cfg Config) (*Client, error) {
 	if cfg.PageSize <= 0 {
 		cfg.PageSize = 1000
@@ -294,8 +307,13 @@ func (c *Client) GetTabular(ctx context.Context, endpoint string) (TabularRespon
 		return TabularResponse{}, err
 	}
 	var resp TabularResponse
-	err := c.do(ctx, http.MethodGet, endpoint, nil, nil, nil, &resp, true)
-	return resp, err
+	if err := c.do(ctx, http.MethodGet, endpoint, nil, nil, nil, &resp, true); err != nil {
+		return resp, err
+	}
+	if len(resp.Failures) > 0 {
+		return resp, TabularFailureError{Endpoint: endpoint, Failures: resp.Failures}
+	}
+	return resp, nil
 }
 
 func (c *Client) GetAlerts(ctx context.Context) (AlertsResponse, error) {
