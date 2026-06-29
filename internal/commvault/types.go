@@ -37,10 +37,8 @@ type VMResponse struct {
 type VMInfo struct {
 	VMHost       string `json:"vmHost"`
 	VMGuestSpace int64  `json:"vmGuestSpace"`
-	BkpStartTime int64  `json:"bkpStartTime"`
 	Type         int    `json:"type"`
 	VMStatus     int    `json:"vmStatus"`
-	VMBackupJob  int64  `json:"vmBackupJob"`
 	OSName       string `json:"strOSName"`
 	IsDeleted    bool   `json:"isDeleted"`
 	Vendor       int    `json:"vendor"`
@@ -48,7 +46,6 @@ type VMInfo struct {
 	VMSize       int64  `json:"vmSize"`
 	VMUsedSpace  int64  `json:"vmUsedSpace"`
 	SubclientID  int64  `json:"subclientId"`
-	BkpEndTime   int64  `json:"bkpEndTime"`
 	VMAgent      string `json:"vmAgent"`
 	Name         string `json:"name"`
 	HardwareVer  string `json:"vmHardwareVer"`
@@ -61,6 +58,7 @@ type VMInfo struct {
 		PlanName string `json:"planName"`
 		PlanID   int64  `json:"planId"`
 	} `json:"plan"`
+	LastBackupJobInfo VMBackupJobInfo `json:"lastBackupJobInfo"`
 }
 
 type Entity struct {
@@ -68,6 +66,16 @@ type Entity struct {
 	Name       string `json:"name"`
 	ClientID   int64  `json:"clientId"`
 	ClientName string `json:"clientName"`
+}
+
+type VMBackupJobInfo struct {
+	JobID     int64         `json:"jobID"`
+	StartTime CommvaultTime `json:"startTime"`
+	EndTime   CommvaultTime `json:"endTime"`
+}
+
+type CommvaultTime struct {
+	Time int64 `json:"time"`
 }
 
 func (e Entity) EntityID() int64 {

@@ -2,6 +2,7 @@ package config
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -43,5 +44,25 @@ func TestChooseDurationAndIntPrecedence(t *testing.T) {
 	}
 	if i != 25 {
 		t.Fatalf("int = %d, want 25", i)
+	}
+}
+
+func TestDefaultReportPathsAndJobWindow(t *testing.T) {
+	cfg := Default()
+	if cfg.JobCompletedLookupTime != 86400 {
+		t.Fatalf("JobCompletedLookupTime = %d, want 86400", cfg.JobCompletedLookupTime)
+	}
+	for name, path := range map[string]string{
+		"CommcellDetails":   cfg.Paths.CommcellDetails,
+		"SLA":               cfg.Paths.SLA,
+		"Jobs24h":           cfg.Paths.Jobs24h,
+		"HealthOverview":    cfg.Paths.HealthOverview,
+		"Environment":       cfg.Paths.Environment,
+		"CurrentCapacity":   cfg.Paths.CurrentCapacity,
+		"StorageSpaceUsage": cfg.Paths.StorageSpaceUsage,
+	} {
+		if !strings.HasPrefix(path, "/CustomReportsEngine/rest/reportsplusengine/datasets/") {
+			t.Fatalf("%s path = %q, want documented report engine path", name, path)
+		}
 	}
 }

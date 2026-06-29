@@ -76,7 +76,7 @@ func run(args []string, stdout io.Writer, stderr io.Writer) int {
 	flags.StringVar(&disabledModulesStr, "disabled-modules", "", "Comma-separated list of collectors to disable")
 	flags.IntVar(&bindPort, "bind-port", 9720, "Port to bind the exporter endpoint to")
 	flags.IntVar(&pageSize, "page-size", 0, "Commvault API page size (default: 1000)")
-	flags.IntVar(&jobCompletedLookupTime, "job-completed-lookup-time", 0, "Job completed lookup window in seconds (default: 31536000)")
+	flags.IntVar(&jobCompletedLookupTime, "job-completed-lookup-time", 0, "Job completed lookup window in seconds (default: 86400)")
 	flags.DurationVar(&timeout, "timeout", 0, "Commvault request timeout (default: 30s)")
 	flags.DurationVar(&refreshInterval, "refresh-interval", 0, "Background cache refresh interval (default: 5m)")
 	flags.DurationVar(&refreshTimeout, "refresh-timeout", 0, "Background cache refresh timeout (default: 2m)")

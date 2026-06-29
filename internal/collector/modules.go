@@ -38,8 +38,8 @@ func (e *Exporter) collectVMs(ctx context.Context) error {
 		e.vmSize.With(e.baseLabels("vm", name, "guid", vm.GUID)).Set(float64(vm.VMSize))
 		e.vmUsed.With(e.baseLabels("vm", name, "guid", vm.GUID)).Set(float64(vm.VMUsedSpace))
 		e.vmGuest.With(e.baseLabels("vm", name, "guid", vm.GUID)).Set(float64(vm.VMGuestSpace))
-		e.vmBackupStart.With(e.baseLabels("vm", name, "guid", vm.GUID)).Set(float64(vm.BkpStartTime))
-		e.vmBackupEnd.With(e.baseLabels("vm", name, "guid", vm.GUID)).Set(float64(vm.BkpEndTime))
+		e.vmBackupStart.With(e.baseLabels("vm", name, "guid", vm.GUID)).Set(float64(vm.LastBackupJobInfo.StartTime.Time))
+		e.vmBackupEnd.With(e.baseLabels("vm", name, "guid", vm.GUID)).Set(float64(vm.LastBackupJobInfo.EndTime.Time))
 	}
 	for code, count := range statusCounts {
 		e.vmStatusCount.With(e.baseLabels("status", strconv.Itoa(code), "status_name", statusName(code))).Set(float64(count))
@@ -255,7 +255,7 @@ func (e *Exporter) collectStorage(ctx context.Context) error {
 	for _, pool := range pools.StoragePoolList {
 		poolID := id(pool.StoragePoolEntity.ID)
 		poolName := pool.StoragePoolEntity.Name
-		e.storagePoolInfo.With(e.baseLabels("pool_id", poolID, "pool", poolName, "status", pool.Status, "type", id(pool.StoragePoolType), "client_group", pool.StoragePool.ClientGroupName)).Set(float64(pool.StatusCode))
+		e.storagePoolInfo.With(e.baseLabels("pool_id", poolID, "pool", poolName, "status", pool.Status, "type", id(pool.StoragePoolType), "client_group", pool.StoragePool.ClientGroupName)).Set(1)
 		e.storagePoolCapacity.With(e.baseLabels("pool_id", poolID, "pool", poolName)).Set(float64(pool.TotalCapacity))
 		e.storagePoolFree.With(e.baseLabels("pool_id", poolID, "pool", poolName)).Set(float64(pool.TotalFreeSpace))
 	}
