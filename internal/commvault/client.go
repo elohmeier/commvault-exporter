@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -153,24 +155,91 @@ func (c *Client) Login(ctx context.Context) error {
 	}
 	body := map[string]any{
 		"username": c.username,
-		"password": c.password,
+		"password": base64.StdEncoding.EncodeToString([]byte(c.password)),
 		"timeout":  30,
 	}
+	var raw json.RawMessage
+	if err := c.do(ctx, http.MethodPost, "Login", nil, nil, body, &raw, false); err != nil {
+		return err
+	}
 	var resp LoginResponse
-	if err := c.do(ctx, http.MethodPost, "Login", nil, nil, body, &resp, false); err != nil {
+	if err := json.Unmarshal(raw, &resp); err != nil {
 		return err
 	}
 	token := strings.TrimSpace(resp.Token)
 	if token == "" {
+		token = strings.TrimSpace(resp.AuthToken)
+	}
+	if token == "" {
+		token = strings.TrimSpace(resp.Data.Token)
+	}
+	if token == "" {
 		token = strings.TrimSpace(resp.Data.AuthToken)
 	}
 	if token == "" {
-		return errors.New("login response did not contain token or data.authToken")
+		return fmt.Errorf("login response did not contain token, authToken, data.token, or data.authToken%s", loginResponseDetail(resp, raw))
 	}
 	c.mu.Lock()
 	c.token = token
 	c.mu.Unlock()
 	return nil
+}
+
+func loginResponseDetail(resp LoginResponse, raw json.RawMessage) string {
+	var details []string
+	add := func(label, value string) {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			details = append(details, label+"="+value)
+		}
+	}
+	if resp.ErrorCode != 0 {
+		details = append(details, fmt.Sprintf("errorCode=%d", resp.ErrorCode))
+	}
+	add("errorMessage", resp.ErrorMessage)
+	add("errLogMessage", resp.ErrLogMessage)
+	add("message", resp.Message)
+	for _, item := range resp.ErrList {
+		if item.ErrorCode != 0 {
+			details = append(details, fmt.Sprintf("errList.errorCode=%d", item.ErrorCode))
+		}
+		add("errList.errorMessage", item.ErrorMessage)
+		add("errList.errLogMessage", item.ErrLogMessage)
+		add("errList.message", item.Message)
+	}
+	if resp.AccountLocked {
+		details = append(details, "isAccountLocked=true")
+	}
+	if resp.ForcePwdChange {
+		details = append(details, "forcePasswordChange=true")
+	}
+	if resp.LoginAttempts != 0 {
+		details = append(details, fmt.Sprintf("loginAttempts=%d", resp.LoginAttempts))
+	}
+	if resp.RemainingLock != 0 {
+		details = append(details, fmt.Sprintf("remainingLockTime=%d", resp.RemainingLock))
+	}
+	if len(details) > 0 {
+		return ": " + strings.Join(details, "; ")
+	}
+	keys := jsonObjectKeys(raw)
+	if len(keys) > 0 {
+		return "; response keys: " + strings.Join(keys, ", ")
+	}
+	return ""
+}
+
+func jsonObjectKeys(raw json.RawMessage) []string {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil || len(obj) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(obj))
+	for key := range obj {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func (c *Client) GetVMs(ctx context.Context) ([]VMInfo, error) {
@@ -361,7 +430,7 @@ func (c *Client) apiURL(endpoint string, query url.Values) url.URL {
 		}
 		u.Path = basePath + "/" + strings.TrimLeft(strings.TrimPrefix(endpointPath, "cc:"), "/")
 	default:
-		if !strings.HasSuffix(basePath, "/webconsole/api") {
+		if !hasKnownAPIBase(basePath) {
 			basePath += "/webconsole/api"
 		}
 		u.Path = basePath + "/" + strings.TrimLeft(endpointPath, "/")
@@ -397,4 +466,13 @@ func trimKnownAPIBase(path string) string {
 		}
 	}
 	return path
+}
+
+func hasKnownAPIBase(path string) bool {
+	for _, suffix := range []string{"/webconsole/api", "/commandcenter/api"} {
+		if strings.HasSuffix(path, suffix) {
+			return true
+		}
+	}
+	return false
 }

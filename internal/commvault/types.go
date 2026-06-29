@@ -1,10 +1,28 @@
 package commvault
 
 type LoginResponse struct {
-	Token string `json:"token"`
-	Data  struct {
+	Token     string `json:"token"`
+	AuthToken string `json:"authToken"`
+	Data      struct {
+		Token     string `json:"token"`
 		AuthToken string `json:"authToken"`
 	} `json:"data"`
+	ErrorCode      int          `json:"errorCode"`
+	ErrorMessage   string       `json:"errorMessage"`
+	ErrLogMessage  string       `json:"errLogMessage"`
+	Message        string       `json:"message"`
+	LoginAttempts  int          `json:"loginAttempts"`
+	RemainingLock  int          `json:"remainingLockTime"`
+	ForcePwdChange bool         `json:"forcePasswordChange"`
+	AccountLocked  bool         `json:"isAccountLocked"`
+	ErrList        []LoginError `json:"errList"`
+}
+
+type LoginError struct {
+	ErrorCode     int    `json:"errorCode"`
+	ErrorMessage  string `json:"errorMessage"`
+	ErrLogMessage string `json:"errLogMessage"`
+	Message       string `json:"message"`
 }
 
 type VMResponse struct {

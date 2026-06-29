@@ -20,6 +20,20 @@ func TestClientLoginAndGetVMsWithPaging(t *testing.T) {
 			if r.Method != http.MethodPost {
 				t.Fatalf("login method = %s", r.Method)
 			}
+			var req struct {
+				Username string `json:"username"`
+				Password string `json:"password"`
+				Timeout  int    `json:"timeout"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatal(err)
+			}
+			if req.Username != "api" {
+				t.Fatalf("login username = %q", req.Username)
+			}
+			if req.Password != "c2VjcmV0" {
+				t.Fatalf("login password = %q, want base64-encoded secret", req.Password)
+			}
 			_ = json.NewEncoder(w).Encode(map[string]string{"token": "QSDK test-token"})
 		case "/webconsole/api/VM":
 			if got := r.Header.Get("Authtoken"); got != "QSDK test-token" {
@@ -97,6 +111,85 @@ func TestClientUsesExistingWebconsoleAPIPath(t *testing.T) {
 	}
 	if _, err := client.GetVMs(context.Background()); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestClientUsesExistingCommandCenterAPIPath(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/commandcenter/api/VM" {
+			t.Fatalf("path = %s", r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"totalRecords": 0, "vmStatusInfoList": []any{}})
+	}))
+	defer server.Close()
+
+	client, err := NewClient(Config{BaseURL: server.URL + "/commandcenter/api", AuthToken: "token", PageSize: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.GetVMs(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestClientLoginUsesDataAuthToken(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/webconsole/api/Login":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"data": map[string]string{"authToken": "QSDK nested-token"},
+			})
+		case "/webconsole/api/VM":
+			if got := r.Header.Get("Authtoken"); got != "QSDK nested-token" {
+				t.Fatalf("Authtoken = %q", got)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"totalRecords": 0, "vmStatusInfoList": []any{}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client, err := NewClient(Config{BaseURL: server.URL, Username: "api", Password: "secret", PageSize: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.GetVMs(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestClientLoginReportsTokenlessResponseDetails(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"errorCode":    5,
+			"errorMessage": "Invalid login credentials",
+			"errList": []map[string]any{{
+				"errorCode":    7,
+				"errorMessage": "Password is not valid",
+			}},
+		})
+	}))
+	defer server.Close()
+
+	client, err := NewClient(Config{BaseURL: server.URL, Username: "api", Password: "secret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.GetVMs(context.Background())
+	if err == nil {
+		t.Fatal("GetVMs error = nil")
+	}
+	for _, want := range []string{
+		"login response did not contain token",
+		"errorCode=5",
+		"errorMessage=Invalid login credentials",
+		"errList.errorCode=7",
+		"errList.errorMessage=Password is not valid",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("GetVMs error = %q, want substring %q", err.Error(), want)
+		}
 	}
 }
 

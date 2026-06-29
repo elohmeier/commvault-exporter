@@ -42,6 +42,8 @@ The exporter listens on `:9720` by default.
 | `-ca-file` | `COMMVAULT_CA_FILE` | none | Custom CA bundle path. |
 
 Credentials are read from `COMMVAULT_USERNAME` and `COMMVAULT_PASSWORD`.
+Set `COMMVAULT_PASSWORD` to the real password; the exporter encodes it for the
+Commvault Login API request.
 Set `COMMVAULT_AUTH_TOKEN` to use a pre-created token instead of logging in.
 
 Disable collectors by these names: `vm`, `dashboard`, `jobs`, `alerts`,
