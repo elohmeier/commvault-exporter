@@ -47,14 +47,23 @@ Commvault Login API request.
 Set `COMMVAULT_AUTH_TOKEN` to use a pre-created token instead of logging in.
 
 Disable collectors by these names: `vm`, `dashboard`, `jobs`, `alerts`,
-`storage`.
+`storage`, `licensing`.
 
-Report-backed dashboard/storage endpoints are configurable because Commvault
-publishes some of them as report dataset paths. Override them with:
+Report-backed dashboard/storage/licensing endpoints are configurable because
+Commvault publishes some of them as report dataset paths. Override them with:
 `COMMVAULT_ENDPOINT_COMMCELL_DETAILS`, `COMMVAULT_ENDPOINT_SLA`,
 `COMMVAULT_ENDPOINT_JOBS_24H`, `COMMVAULT_ENDPOINT_HEALTH_OVERVIEW`,
 `COMMVAULT_ENDPOINT_ENVIRONMENT`, `COMMVAULT_ENDPOINT_CURRENT_CAPACITY`, and
 `COMMVAULT_ENDPOINT_STORAGE_SPACE_USAGE`.
+
+Licensing report endpoints can also be overridden with
+`COMMVAULT_ENDPOINT_LICENSE_OPERATING_INSTANCES`,
+`COMMVAULT_ENDPOINT_LICENSE_ENDPOINT_USERS`,
+`COMMVAULT_ENDPOINT_LICENSE_HYPERSCALE_STORAGE`,
+`COMMVAULT_ENDPOINT_LICENSE_AIRGAP_PROTECT`, and
+`COMMVAULT_ENDPOINT_LICENSE_DATA_INSIGHTS`. Current capacity is collected by
+the `licensing` module and still emits the compatibility metric
+`commvault_capacity_usage`.
 
 `COMMVAULT_ENDPOINT_ENVIRONMENT` has no built-in default because the observed
 Commvault environment dataset returns a report-engine `CacheDB` bad-request

@@ -51,7 +51,7 @@ func TestExporterRefreshVMModule(t *testing.T) {
 	}
 	cfg := config.Default()
 	cfg.RefreshTimeout = time.Second
-	cfg.DisabledModules = []string{"dashboard", "jobs", "alerts", "storage"}
+	cfg.DisabledModules = []string{"dashboard", "jobs", "alerts", "storage", "licensing"}
 	exporter := New(cfg, client, slog.Default())
 	if err := exporter.RefreshOnce(context.Background()); err != nil {
 		t.Fatal(err)
@@ -135,7 +135,7 @@ func TestExporterSkipsEnvironmentReportWhenNoEndpointConfigured(t *testing.T) {
 	}
 	cfg := config.Default()
 	cfg.RefreshTimeout = time.Second
-	cfg.DisabledModules = []string{"vm", "jobs", "alerts", "storage"}
+	cfg.DisabledModules = []string{"vm", "jobs", "alerts", "storage", "licensing"}
 	cfg.Paths.CommcellDetails = "/reports/commcell"
 	cfg.Paths.SLA = "/reports/sla"
 	cfg.Paths.Jobs24h = "/reports/jobs-24h"
@@ -151,6 +151,7 @@ func TestExporterSkipsEnvironmentReportWhenNoEndpointConfigured(t *testing.T) {
 }
 
 func TestExporterStoragePoolInfoIsInfoMetric(t *testing.T) {
+	var currentCapacityRequests int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/commandcenter/api/StoragePool":
@@ -174,7 +175,10 @@ func TestExporterStoragePoolInfoIsInfoMetric(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]any{"policies": []any{}, "error": map[string]any{"errorCode": 0}})
 		case "/commandcenter/api/MediaAgent":
 			_ = json.NewEncoder(w).Encode(map[string]any{"response": []any{}})
-		case "/reports/current-capacity", "/reports/storage-space-usage":
+		case "/reports/current-capacity":
+			atomic.AddInt32(&currentCapacityRequests, 1)
+			_ = json.NewEncoder(w).Encode(map[string]any{"columns": []any{}, "records": []any{}})
+		case "/reports/storage-space-usage":
 			_ = json.NewEncoder(w).Encode(map[string]any{"columns": []any{}, "records": []any{}})
 		default:
 			http.NotFound(w, r)
@@ -188,12 +192,15 @@ func TestExporterStoragePoolInfoIsInfoMetric(t *testing.T) {
 	}
 	cfg := config.Default()
 	cfg.RefreshTimeout = time.Second
-	cfg.DisabledModules = []string{"vm", "dashboard", "jobs", "alerts"}
+	cfg.DisabledModules = []string{"vm", "dashboard", "jobs", "alerts", "licensing"}
 	cfg.Paths.CurrentCapacity = "/reports/current-capacity"
 	cfg.Paths.StorageSpaceUsage = "/reports/storage-space-usage"
 	exporter := New(cfg, client, slog.Default())
 	if err := exporter.RefreshOnce(context.Background()); err != nil {
 		t.Fatal(err)
+	}
+	if got := atomic.LoadInt32(&currentCapacityRequests); got != 0 {
+		t.Fatalf("current capacity requests = %d, want 0 when only storage is enabled", got)
 	}
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(exporter)
@@ -204,6 +211,144 @@ commvault_storage_pool_info{client_group="group-a",pool="pool-a",pool_id="42",st
 `
 	if err := testutil.GatherAndCompare(reg, strings.NewReader(expected), "commvault_storage_pool_info"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestExporterLicensingEmitsAggregateMetrics(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/reports/current-capacity", "/reports/license-empty":
+			_ = json.NewEncoder(w).Encode(map[string]any{"columns": []any{}, "records": []any{}})
+		case "/commandcenter/api/cr/reportsplusengine/datasets/license-operating/data":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"columns": []map[string]any{
+					{"name": "License ID"},
+					{"name": "License"},
+					{"name": "Available Total (instances)"},
+					{"name": "Permanent Purchased (instances)"},
+					{"name": "Term Purchased (instances)"},
+					{"name": "Used (instances)"},
+					{"name": "EvalExpiryDate"},
+					{"name": "Summary"},
+				},
+				"records": [][]any{{"100032", "Operating Instances", 20, 15, 5, 12, "01 Jan 1970", "60.00%"}},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client, err := commvault.NewClient(commvault.Config{BaseURL: server.URL, AuthToken: "token", PageSize: 1000, Timeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.RefreshTimeout = time.Second
+	cfg.DisabledModules = []string{"vm", "dashboard", "jobs", "alerts", "storage"}
+	cfg.Paths.CurrentCapacity = "/reports/current-capacity"
+	cfg.Paths.LicenseOperatingInstances = "cc:cr/reportsplusengine/datasets/license-operating/data"
+	cfg.Paths.LicenseEndpointUsers = "/reports/license-empty"
+	cfg.Paths.LicenseHyperscaleStorage = "/reports/license-empty"
+	cfg.Paths.LicenseAirGapProtect = "/reports/license-empty"
+	cfg.Paths.LicenseDataInsights = "/reports/license-empty"
+	exporter := New(cfg, client, slog.Default())
+	if err := exporter.RefreshOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	reg := prometheus.NewRegistry()
+	reg.MustRegister(exporter)
+	expected := `
+# HELP commvault_license_amount Commvault license amount by report, license, unit, and kind.
+# TYPE commvault_license_amount gauge
+commvault_license_amount{kind="available_total",license="Operating Instances",license_id="100032",report="operating_instances",unit="instances"} 20
+commvault_license_amount{kind="permanent_purchased",license="Operating Instances",license_id="100032",report="operating_instances",unit="instances"} 15
+commvault_license_amount{kind="term_purchased",license="Operating Instances",license_id="100032",report="operating_instances",unit="instances"} 5
+commvault_license_amount{kind="used",license="Operating Instances",license_id="100032",report="operating_instances",unit="instances"} 12
+# HELP commvault_license_info Commvault license report metadata.
+# TYPE commvault_license_info gauge
+commvault_license_info{eval_expiry_date="01 Jan 1970",license="Operating Instances",license_id="100032",report="operating_instances",summary="60.00%",unit="instances"} 1
+`
+	if err := testutil.GatherAndCompare(reg, strings.NewReader(expected), "commvault_license_amount", "commvault_license_info"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestExporterLicensingEmitsCurrentCapacityCompatibilityMetric(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/reports/current-capacity":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"columns": []map[string]any{
+					{"name": "Dial"},
+					{"name": "Purchased"},
+					{"name": "PermTotal"},
+					{"name": "Eval"},
+					{"name": "Usage"},
+				},
+				"records": [][]any{{"Backup", 100, 90, 10, 33.5}},
+			})
+		case "/reports/license-empty":
+			_ = json.NewEncoder(w).Encode(map[string]any{"columns": []any{}, "records": []any{}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client, err := commvault.NewClient(commvault.Config{BaseURL: server.URL, AuthToken: "token", PageSize: 1000, Timeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.RefreshTimeout = time.Second
+	cfg.DisabledModules = []string{"vm", "dashboard", "jobs", "alerts", "storage"}
+	cfg.Paths.CurrentCapacity = "/reports/current-capacity"
+	cfg.Paths.LicenseOperatingInstances = "/reports/license-empty"
+	cfg.Paths.LicenseEndpointUsers = "/reports/license-empty"
+	cfg.Paths.LicenseHyperscaleStorage = "/reports/license-empty"
+	cfg.Paths.LicenseAirGapProtect = "/reports/license-empty"
+	cfg.Paths.LicenseDataInsights = "/reports/license-empty"
+	exporter := New(cfg, client, slog.Default())
+	if err := exporter.RefreshOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	reg := prometheus.NewRegistry()
+	reg.MustRegister(exporter)
+	expected := `
+# HELP commvault_capacity_usage Commvault capacity usage by dial.
+# TYPE commvault_capacity_usage gauge
+commvault_capacity_usage{dial="Backup",kind="evaluation"} 10
+commvault_capacity_usage{dial="Backup",kind="permanent_total"} 90
+commvault_capacity_usage{dial="Backup",kind="purchased"} 100
+commvault_capacity_usage{dial="Backup",kind="usage"} 33.5
+`
+	if err := testutil.GatherAndCompare(reg, strings.NewReader(expected), "commvault_capacity_usage"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestExporterSkipsLicensingWhenDisabled(t *testing.T) {
+	var requests int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&requests, 1)
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	client, err := commvault.NewClient(commvault.Config{BaseURL: server.URL, AuthToken: "token", PageSize: 1000, Timeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.RefreshTimeout = time.Second
+	cfg.DisabledModules = []string{"vm", "dashboard", "jobs", "alerts", "storage", "licensing"}
+	exporter := New(cfg, client, slog.Default())
+	if err := exporter.RefreshOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := atomic.LoadInt32(&requests); got != 0 {
+		t.Fatalf("requests = %d, want 0", got)
 	}
 }
 

@@ -226,7 +226,6 @@ func (e *Exporter) collectStorage(ctx context.Context) error {
 	var pools commvault.StoragePoolsResponse
 	var policies commvault.StoragePoliciesResponse
 	var mediaAgents commvault.MediaAgentsResponse
-	var currentCapacity commvault.TabularResponse
 	var spaceUsage commvault.TabularResponse
 	errs := []error{
 		e.runSubcollector(ctx, "storage", "pools", func(ctx context.Context) error {
@@ -242,11 +241,6 @@ func (e *Exporter) collectStorage(ctx context.Context) error {
 		e.runSubcollector(ctx, "storage", "media_agents", func(ctx context.Context) error {
 			var err error
 			mediaAgents, err = e.client.GetMediaAgents(ctx)
-			return err
-		}),
-		e.runSubcollector(ctx, "storage", "current_capacity", func(ctx context.Context) error {
-			var err error
-			currentCapacity, err = e.client.GetTabular(ctx, e.cfg.Paths.CurrentCapacity)
 			return err
 		}),
 		e.runSubcollector(ctx, "storage", "storage_space_usage", func(ctx context.Context) error {
@@ -273,13 +267,6 @@ func (e *Exporter) collectStorage(ctx context.Context) error {
 	for _, agent := range mediaAgents.Response {
 		e.mediaAgentInfo.With(e.baseLabels("media_agent_id", id(agent.EntityInfo.ID), "media_agent", agent.EntityInfo.Name)).Set(1)
 	}
-	for _, row := range tableRows(currentCapacity) {
-		dial := s(row["Dial"])
-		e.capacityUsage.With(e.baseLabels("dial", dial, "kind", "purchased")).Set(f(row["Purchased"]))
-		e.capacityUsage.With(e.baseLabels("dial", dial, "kind", "permanent_total")).Set(f(row["PermTotal"]))
-		e.capacityUsage.With(e.baseLabels("dial", dial, "kind", "evaluation")).Set(f(row["Eval"]))
-		e.capacityUsage.With(e.baseLabels("dial", dial, "kind", "usage")).Set(f(row["Usage"]))
-	}
 	for _, row := range tableRows(spaceUsage) {
 		libraryID := s(row["LibraryId"])
 		library := s(row["LibraryName"])
@@ -290,6 +277,140 @@ func (e *Exporter) collectStorage(ctx context.Context) error {
 		e.libraryFreeRatio.With(e.baseLabels("library_id", libraryID, "library", library, "health_status", health)).Set(f(row["FreeSpacePercentage"]) / 100)
 	}
 	return errors.Join(errs...)
+}
+
+func (e *Exporter) collectLicensing(ctx context.Context) error {
+	errs := []error{
+		e.runSubcollector(ctx, "licensing", "current_capacity", e.collectCurrentCapacity),
+		e.runSubcollector(ctx, "licensing", "operating_instances", func(ctx context.Context) error {
+			return e.collectLicenseReport(ctx, e.cfg.Paths.LicenseOperatingInstances, "operating_instances", "instances")
+		}),
+		e.runSubcollector(ctx, "licensing", "endpoint_users", func(ctx context.Context) error {
+			return e.collectLicenseReport(ctx, e.cfg.Paths.LicenseEndpointUsers, "endpoint_users", "users")
+		}),
+		e.runSubcollector(ctx, "licensing", "hyperscale_storage", func(ctx context.Context) error {
+			return e.collectLicenseReport(ctx, e.cfg.Paths.LicenseHyperscaleStorage, "hyperscale_storage", "tb")
+		}),
+		e.runSubcollector(ctx, "licensing", "airgap_protect", func(ctx context.Context) error {
+			return e.collectLicenseReport(ctx, e.cfg.Paths.LicenseAirGapProtect, "airgap_protect", "tb")
+		}),
+		e.runSubcollector(ctx, "licensing", "data_insights", func(ctx context.Context) error {
+			return e.collectLicenseReport(ctx, e.cfg.Paths.LicenseDataInsights, "data_insights", "count")
+		}),
+	}
+	return errors.Join(errs...)
+}
+
+func (e *Exporter) collectCurrentCapacity(ctx context.Context) error {
+	if e.cfg.Paths.CurrentCapacity == "" {
+		return nil
+	}
+	resp, err := e.client.GetTabular(ctx, e.cfg.Paths.CurrentCapacity)
+	if err != nil {
+		return err
+	}
+	e.cacheMu.Lock()
+	defer e.cacheMu.Unlock()
+	for _, row := range tableRows(resp) {
+		dial := s(row["Dial"])
+		e.capacityUsage.With(e.baseLabels("dial", dial, "kind", "purchased")).Set(f(row["Purchased"]))
+		e.capacityUsage.With(e.baseLabels("dial", dial, "kind", "permanent_total")).Set(f(row["PermTotal"]))
+		e.capacityUsage.With(e.baseLabels("dial", dial, "kind", "evaluation")).Set(f(row["Eval"]))
+		e.capacityUsage.With(e.baseLabels("dial", dial, "kind", "usage")).Set(f(row["Usage"]))
+	}
+	return nil
+}
+
+func (e *Exporter) collectLicenseReport(ctx context.Context, endpoint, report, unit string) error {
+	if endpoint == "" {
+		return nil
+	}
+	resp, err := e.client.GetTabular(ctx, endpoint)
+	if err != nil {
+		return err
+	}
+	e.cacheMu.Lock()
+	defer e.cacheMu.Unlock()
+	for _, row := range tableRows(resp) {
+		e.collectLicenseRowLocked(report, unit, row)
+	}
+	return nil
+}
+
+func (e *Exporter) collectLicenseRowLocked(report, unit string, row map[string]any) {
+	licenseID := firstString(row, "License ID", "LicUsageType")
+	license := firstString(row, "License", "Dial")
+	summary := firstString(row, "Summary")
+	evalExpiryDate := firstString(row, "EvalExpiryDate")
+	infoLabels := e.baseLabels(
+		"license_id", licenseID,
+		"license", license,
+		"report", report,
+		"unit", unit,
+		"summary", summary,
+		"eval_expiry_date", evalExpiryDate,
+	)
+	e.licenseInfo.With(infoLabels).Set(1)
+	for _, amount := range []struct {
+		kind string
+		base string
+	}{
+		{kind: "available_total", base: "Available Total"},
+		{kind: "permanent_purchased", base: "Permanent Purchased"},
+		{kind: "term_purchased", base: "Term Purchased"},
+		{kind: "used", base: "Used"},
+	} {
+		e.licenseAmount.With(e.baseLabels(
+			"license_id", licenseID,
+			"license", license,
+			"report", report,
+			"unit", unit,
+			"kind", amount.kind,
+		)).Set(f(licenseColumnValue(row, amount.base, unit)))
+	}
+}
+
+func licenseColumnValue(row map[string]any, base, unit string) any {
+	if suffix := licenseUnitColumnSuffix(unit); suffix != "" {
+		if value, ok := row[base+" ("+suffix+")"]; ok {
+			return value
+		}
+	}
+	if value, ok := row[base]; ok {
+		return value
+	}
+	switch base {
+	case "Available Total":
+		return row["Purchased"]
+	case "Permanent Purchased":
+		return row["PermTotal"]
+	case "Term Purchased":
+		return row["Eval"]
+	case "Used":
+		return row["Usage"]
+	default:
+		return nil
+	}
+}
+
+func licenseUnitColumnSuffix(unit string) string {
+	switch unit {
+	case "instances", "users":
+		return unit
+	case "tb":
+		return "TB"
+	default:
+		return ""
+	}
+}
+
+func firstString(row map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if value, ok := row[key]; ok {
+			return s(value)
+		}
+	}
+	return ""
 }
 
 var _ = commvault.VMInfo{}

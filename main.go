@@ -29,10 +29,11 @@ var (
 
 var reservedCustomLabelNames = []string{
 	"alert", "alert_id", "app", "backup_level", "category", "client", "collector", "commcell", "copies", "criterion",
-	"deleted", "dial", "entity", "guid", "health_status", "job_id", "job_type", "kind", "library", "library_id",
-	"media_agent", "media_agent_id", "operation", "os", "plans", "policy", "policy_id", "pool", "pool_id",
+	"deleted", "dial", "entity", "eval_expiry_date", "guid", "health_status", "job_id", "job_type", "kind",
+	"library", "library_id", "license", "license_id", "media_agent", "media_agent_id", "operation", "os", "plans",
+	"policy", "policy_id", "pool", "pool_id",
 	"proxy_client", "read", "release", "severity", "status", "status_name", "subclient", "type", "version",
-	"vm", "vsa_client",
+	"report", "summary", "unit", "vm", "vsa_client",
 }
 
 var (
