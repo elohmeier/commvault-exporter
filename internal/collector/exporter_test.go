@@ -287,7 +287,7 @@ commvault_license_info{eval_expiry_date="28 Dec 2027",license="Operating Instanc
 	}
 }
 
-func TestExporterLicensingEmitsCurrentCapacityCompatibilityMetric(t *testing.T) {
+func TestExporterLicensingEmitsCurrentCapacityMetrics(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/webconsole/api/V4/License":
@@ -305,8 +305,12 @@ func TestExporterLicensingEmitsCurrentCapacityCompatibilityMetric(t *testing.T) 
 					{"name": "PermTotal"},
 					{"name": "Eval"},
 					{"name": "Usage"},
+					{"name": "EvalExpiryDate"},
 				},
-				"records": [][]any{{"Backup", 100, 90, 10, 33.5}},
+				"records": [][]any{
+					{"Backup", 100, 90, 10, 33.5, "28 Dec 2027"},
+					{"Backup for Unstructured Data", 0, 0, 0, 52.64, "01 Jan 1970"},
+				},
 			})
 		case "/reports/license-empty":
 			_ = json.NewEncoder(w).Encode(map[string]any{"columns": []any{}, "records": []any{}})
@@ -342,8 +346,16 @@ commvault_capacity_usage{dial="Backup",kind="permanent_total"} 90
 commvault_capacity_usage{dial="Backup",kind="purchased"} 100
 commvault_capacity_usage{dial="Backup",kind="term_purchased"} 10
 commvault_capacity_usage{dial="Backup",kind="usage"} 33.5
+commvault_capacity_usage{dial="Backup for Unstructured Data",kind="permanent_total"} 0
+commvault_capacity_usage{dial="Backup for Unstructured Data",kind="purchased"} 0
+commvault_capacity_usage{dial="Backup for Unstructured Data",kind="term_purchased"} 0
+commvault_capacity_usage{dial="Backup for Unstructured Data",kind="usage"} 52.64
+# HELP commvault_capacity_license_expiry_timestamp_seconds Unix timestamp of the capacity license expiry reported by Commvault; 0 means no expiry was supplied.
+# TYPE commvault_capacity_license_expiry_timestamp_seconds gauge
+commvault_capacity_license_expiry_timestamp_seconds{dial="Backup"} 1.829952e+09
+commvault_capacity_license_expiry_timestamp_seconds{dial="Backup for Unstructured Data"} 0
 `
-	if err := testutil.GatherAndCompare(reg, strings.NewReader(expected), "commvault_capacity_usage"); err != nil {
+	if err := testutil.GatherAndCompare(reg, strings.NewReader(expected), "commvault_capacity_usage", "commvault_capacity_license_expiry_timestamp_seconds"); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -457,6 +469,40 @@ func TestExporterLicensingReportsMalformedExpiryDate(t *testing.T) {
 	}
 	if got := testutil.ToFloat64(exporter.subcollectorUp.WithLabelValues("licensing", "operating_instances")); got != 0 {
 		t.Fatalf("operating_instances subcollector up = %v, want 0", got)
+	}
+}
+
+func TestExporterCurrentCapacityReportsMalformedExpiryDate(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/webconsole/api/V4/License":
+			_ = json.NewEncoder(w).Encode(map[string]any{"expiryDate": 1829969940})
+		case "/reports/current-capacity":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"columns": []map[string]any{
+					{"name": "Dial"},
+					{"name": "EvalExpiryDate"},
+				},
+				"records": [][]any{{"Backup", "2027-12-28"}},
+			})
+		case "/reports/empty":
+			_ = json.NewEncoder(w).Encode(map[string]any{"columns": []any{}, "records": []any{}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	exporter := newLicensingOnlyExporter(t, server.URL, "/reports/empty")
+	exporter.cfg.Paths.CurrentCapacity = "/reports/current-capacity"
+	if err := exporter.RefreshOnce(context.Background()); err == nil {
+		t.Fatal("RefreshOnce error = nil")
+	}
+	if got := testutil.ToFloat64(exporter.subcollectorUp.WithLabelValues("licensing", "current_capacity")); got != 0 {
+		t.Fatalf("current_capacity subcollector up = %v, want 0", got)
+	}
+	if got := testutil.CollectAndCount(exporter.capacityExpiry); got != 0 {
+		t.Fatalf("capacity expiry metric count = %d, want 0 after malformed date", got)
 	}
 }
 

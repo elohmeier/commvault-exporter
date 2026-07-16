@@ -63,7 +63,8 @@ Licensing report endpoints can also be overridden with
 `COMMVAULT_ENDPOINT_LICENSE_AIRGAP_PROTECT`, and
 `COMMVAULT_ENDPOINT_LICENSE_DATA_INSIGHTS`. Current capacity is collected by
 the `licensing` module and still emits the compatibility metric
-`commvault_capacity_usage`.
+`commvault_capacity_usage`. It also emits
+`commvault_capacity_license_expiry_timestamp_seconds` by capacity dial.
 
 The licensing module also calls `GET /webconsole/api/V4/License` and exports:
 
@@ -74,6 +75,9 @@ The licensing module also calls `GET /webconsole/api/V4/License` and exports:
   Report dates use the Commvault `02 Jan 2006` format and are interpreted as
   midnight UTC. The existing `eval_expiry_date` label on
   `commvault_license_info` is retained for compatibility.
+- `commvault_capacity_license_expiry_timestamp_seconds` for each capacity
+  license dial. Its value comes from the Current Capacity report's
+  `EvalExpiryDate` field and is interpreted as midnight UTC.
 
 An empty expiry, the API value `0`, or the report sentinel `01 Jan 1970` is
 exported as `0`. Guard alerts with `> 0`, for example:

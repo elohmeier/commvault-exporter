@@ -328,14 +328,30 @@ func (e *Exporter) collectCurrentCapacity(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	type parsedCapacityRow struct {
+		row    map[string]any
+		expiry float64
+	}
+	rows := tableRows(resp)
+	parsed := make([]parsedCapacityRow, 0, len(rows))
+	for _, row := range rows {
+		expiryDate := firstString(row, "EvalExpiryDate")
+		expiry, err := parseLicenseExpiryDate(expiryDate)
+		if err != nil {
+			return fmt.Errorf("current capacity dial=%q expiry_date=%q: %w", firstString(row, "Dial"), expiryDate, err)
+		}
+		parsed = append(parsed, parsedCapacityRow{row: row, expiry: expiry})
+	}
 	e.cacheMu.Lock()
 	defer e.cacheMu.Unlock()
-	for _, row := range tableRows(resp) {
+	for _, item := range parsed {
+		row := item.row
 		dial := s(row["Dial"])
 		e.capacityUsage.With(e.baseLabels("dial", dial, "kind", "purchased")).Set(f(row["Purchased"]))
 		e.capacityUsage.With(e.baseLabels("dial", dial, "kind", "permanent_total")).Set(f(row["PermTotal"]))
 		e.capacityUsage.With(e.baseLabels("dial", dial, "kind", "term_purchased")).Set(f(row["Eval"]))
 		e.capacityUsage.With(e.baseLabels("dial", dial, "kind", "usage")).Set(f(row["Usage"]))
+		e.capacityExpiry.With(e.baseLabels("dial", dial)).Set(item.expiry)
 	}
 	return nil
 }
