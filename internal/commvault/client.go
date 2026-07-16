@@ -334,6 +334,15 @@ func (c *Client) GetTriggeredAlerts(ctx context.Context) (TriggeredAlertsRespons
 	return resp, err
 }
 
+func (c *Client) GetLicenseInfo(ctx context.Context) (LicenseInfoResponse, error) {
+	if err := c.EnsureLogin(ctx); err != nil {
+		return LicenseInfoResponse{}, err
+	}
+	var resp LicenseInfoResponse
+	err := c.do(ctx, http.MethodGet, "/webconsole/api/V4/License", nil, nil, nil, &resp, true)
+	return resp, err
+}
+
 func (c *Client) GetStoragePools(ctx context.Context) (StoragePoolsResponse, error) {
 	if err := c.EnsureLogin(ctx); err != nil {
 		return StoragePoolsResponse{}, err

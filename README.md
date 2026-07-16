@@ -65,6 +65,33 @@ Licensing report endpoints can also be overridden with
 the `licensing` module and still emits the compatibility metric
 `commvault_capacity_usage`.
 
+The licensing module also calls `GET /webconsole/api/V4/License` and exports:
+
+- `commvault_commcell_license_expiry_timestamp_seconds` for the exact CommCell
+  license expiry returned by the API. Its labels are `commcell_id`, `edition`,
+  and `license_mode`.
+- `commvault_license_expiry_timestamp_seconds` for each report-backed license.
+  Report dates use the Commvault `02 Jan 2006` format and are interpreted as
+  midnight UTC. The existing `eval_expiry_date` label on
+  `commvault_license_info` is retained for compatibility.
+
+An empty expiry, the API value `0`, or the report sentinel `01 Jan 1970` is
+exported as `0`. Guard alerts with `> 0`, for example:
+
+```promql
+commvault_commcell_license_expiry_timestamp_seconds > 0
+and
+commvault_commcell_license_expiry_timestamp_seconds - time() < 60 * 24 * 60 * 60
+```
+
+The capacity report's raw `Eval` column represents term-purchased capacity.
+The corresponding series is therefore exposed as
+`commvault_capacity_usage{kind="term_purchased"}`. This is a breaking label
+rename from `kind="evaluation"`; update queries and alerts when upgrading.
+
+The Data Insights report keeps its existing generic field mapping until it can
+be validated against a licensed CommCell UI/API response.
+
 `COMMVAULT_ENDPOINT_ENVIRONMENT` has no built-in default because the observed
 Commvault environment dataset returns a report-engine `CacheDB` bad-request
 failure. The environment entity-count metrics are collected only when this

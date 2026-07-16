@@ -25,6 +25,17 @@ type LoginError struct {
 	Message       string `json:"message"`
 }
 
+type LicenseInfoResponse struct {
+	CommCellID         int64  `json:"commCellId"`
+	CommServeIPAddress string `json:"commServeIPAddress"`
+	LicenseIPAddress   string `json:"licenseIPAddress"`
+	Edition            string `json:"edition"`
+	LicenseMode        string `json:"licenseMode"`
+	SerialNumber       string `json:"serialNumber"`
+	RegistrationCode   string `json:"registrationCode"`
+	ExpiryDate         int64  `json:"expiryDate"`
+}
+
 type VMResponse struct {
 	TotalRecords     int      `json:"totalRecords"`
 	PageNo           int      `json:"pageNo"`

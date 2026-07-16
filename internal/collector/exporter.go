@@ -80,6 +80,9 @@ type Exporter struct {
 	licenseAmount       *prometheus.GaugeVec
 	librarySpace        *prometheus.GaugeVec
 	libraryFreeRatio    *prometheus.GaugeVec
+
+	commcellLicenseExpiry *prometheus.GaugeVec
+	licenseExpiry         *prometheus.GaugeVec
 }
 
 type moduleState struct {
@@ -195,6 +198,9 @@ func New(cfg config.Config, client *commvault.Client, logger *slog.Logger) *Expo
 		licenseAmount:       g("license_amount", "Commvault license amount by report, license, unit, and kind.", []string{"license_id", "license", "report", "unit", "kind"}),
 		librarySpace:        g("library_space_bytes", "Commvault library space by kind.", []string{"library_id", "library", "health_status", "kind"}),
 		libraryFreeRatio:    g("library_free_ratio", "Commvault library free-space ratio.", []string{"library_id", "library", "health_status"}),
+
+		commcellLicenseExpiry: g("commcell_license_expiry_timestamp_seconds", "Unix timestamp when the current CommCell license expires; 0 means no expiry was supplied.", []string{"commcell_id", "edition", "license_mode"}),
+		licenseExpiry:         g("license_expiry_timestamp_seconds", "Unix timestamp of the license expiry reported by Commvault; 0 means no expiry was supplied.", []string{"license_id", "license", "report", "unit"}),
 	}
 	e.up.With(e.baseLabels()).Set(0)
 	e.cacheStale.With(e.baseLabels()).Set(1)
@@ -448,7 +454,7 @@ func (e *Exporter) allCollectors() []prometheus.Collector {
 		e.jobInfo, e.jobStatus, e.jobPercentComplete, e.jobElapsed, e.jobStart, e.jobLastUpdate, e.jobSizeApplication, e.jobFailedFiles,
 		e.alertConfigInfo, e.alertTriggeredInfo, e.alertTriggeredTime, e.alertTriggeredCount, e.alertUnreadCount,
 		e.storagePoolInfo, e.storagePoolCapacity, e.storagePoolFree, e.storagePolicyInfo, e.storagePolicyStream, e.mediaAgentInfo,
-		e.capacityUsage, e.licenseInfo, e.licenseAmount, e.librarySpace, e.libraryFreeRatio,
+		e.capacityUsage, e.commcellLicenseExpiry, e.licenseInfo, e.licenseAmount, e.licenseExpiry, e.librarySpace, e.libraryFreeRatio,
 	}
 }
 
@@ -461,7 +467,7 @@ func (e *Exporter) resetDataMetrics() {
 		e.jobInfo, e.jobStatus, e.jobPercentComplete, e.jobElapsed, e.jobStart, e.jobLastUpdate, e.jobSizeApplication, e.jobFailedFiles,
 		e.alertConfigInfo, e.alertTriggeredInfo, e.alertTriggeredTime, e.alertTriggeredCount, e.alertUnreadCount,
 		e.storagePoolInfo, e.storagePoolCapacity, e.storagePoolFree, e.storagePolicyInfo, e.storagePolicyStream, e.mediaAgentInfo,
-		e.capacityUsage, e.licenseInfo, e.licenseAmount, e.librarySpace, e.libraryFreeRatio,
+		e.capacityUsage, e.commcellLicenseExpiry, e.licenseInfo, e.licenseAmount, e.licenseExpiry, e.librarySpace, e.libraryFreeRatio,
 	} {
 		collector.Reset()
 	}

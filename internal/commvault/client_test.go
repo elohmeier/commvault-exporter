@@ -114,6 +114,43 @@ func TestClientUsesExistingWebconsoleAPIPath(t *testing.T) {
 	}
 }
 
+func TestClientGetLicenseInfo(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/webconsole/api/V4/License" {
+			t.Fatalf("path = %s", r.URL.Path)
+		}
+		if r.Method != http.MethodGet {
+			t.Fatalf("method = %s", r.Method)
+		}
+		if got := r.Header.Get("Authtoken"); got != "token" {
+			t.Fatalf("Authtoken = %q", got)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"commCellId":         1063328,
+			"commServeIPAddress": "10.203.33.1",
+			"licenseIPAddress":   "255.255.255.255",
+			"edition":            "Commvault",
+			"licenseMode":        "PRODUCTION",
+			"serialNumber":       "redacted",
+			"registrationCode":   "redacted",
+			"expiryDate":         1829969940,
+		})
+	}))
+	defer server.Close()
+
+	client, err := NewClient(Config{BaseURL: server.URL + "/commandcenter/api", AuthToken: "token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	license, err := client.GetLicenseInfo(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if license.CommCellID != 1063328 || license.Edition != "Commvault" || license.LicenseMode != "PRODUCTION" || license.ExpiryDate != 1829969940 {
+		t.Fatalf("license = %#v", license)
+	}
+}
+
 func TestClientUsesExistingCommandCenterAPIPath(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/commandcenter/api/VM" {

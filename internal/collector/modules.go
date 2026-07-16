@@ -3,7 +3,10 @@ package collector
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strconv"
+	"strings"
+	"time"
 
 	"github.com/elohmeier/commvault-exporter/internal/commvault"
 )
@@ -281,6 +284,7 @@ func (e *Exporter) collectStorage(ctx context.Context) error {
 
 func (e *Exporter) collectLicensing(ctx context.Context) error {
 	errs := []error{
+		e.runSubcollector(ctx, "licensing", "commcell_license", e.collectCommcellLicense),
 		e.runSubcollector(ctx, "licensing", "current_capacity", e.collectCurrentCapacity),
 		e.runSubcollector(ctx, "licensing", "operating_instances", func(ctx context.Context) error {
 			return e.collectLicenseReport(ctx, e.cfg.Paths.LicenseOperatingInstances, "operating_instances", "instances")
@@ -301,6 +305,21 @@ func (e *Exporter) collectLicensing(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
+func (e *Exporter) collectCommcellLicense(ctx context.Context) error {
+	license, err := e.client.GetLicenseInfo(ctx)
+	if err != nil {
+		return err
+	}
+	e.cacheMu.Lock()
+	defer e.cacheMu.Unlock()
+	e.commcellLicenseExpiry.With(e.baseLabels(
+		"commcell_id", strconv.FormatInt(license.CommCellID, 10),
+		"edition", license.Edition,
+		"license_mode", license.LicenseMode,
+	)).Set(float64(license.ExpiryDate))
+	return nil
+}
+
 func (e *Exporter) collectCurrentCapacity(ctx context.Context) error {
 	if e.cfg.Paths.CurrentCapacity == "" {
 		return nil
@@ -315,7 +334,7 @@ func (e *Exporter) collectCurrentCapacity(ctx context.Context) error {
 		dial := s(row["Dial"])
 		e.capacityUsage.With(e.baseLabels("dial", dial, "kind", "purchased")).Set(f(row["Purchased"]))
 		e.capacityUsage.With(e.baseLabels("dial", dial, "kind", "permanent_total")).Set(f(row["PermTotal"]))
-		e.capacityUsage.With(e.baseLabels("dial", dial, "kind", "evaluation")).Set(f(row["Eval"]))
+		e.capacityUsage.With(e.baseLabels("dial", dial, "kind", "term_purchased")).Set(f(row["Eval"]))
 		e.capacityUsage.With(e.baseLabels("dial", dial, "kind", "usage")).Set(f(row["Usage"]))
 	}
 	return nil
@@ -329,15 +348,29 @@ func (e *Exporter) collectLicenseReport(ctx context.Context, endpoint, report, u
 	if err != nil {
 		return err
 	}
+	type parsedLicenseRow struct {
+		row    map[string]any
+		expiry float64
+	}
+	rows := tableRows(resp)
+	parsed := make([]parsedLicenseRow, 0, len(rows))
+	for _, row := range rows {
+		expiryDate := firstString(row, "EvalExpiryDate")
+		expiry, err := parseLicenseExpiryDate(expiryDate)
+		if err != nil {
+			return fmt.Errorf("license report %s license_id=%q expiry_date=%q: %w", report, firstString(row, "License ID", "LicUsageType"), expiryDate, err)
+		}
+		parsed = append(parsed, parsedLicenseRow{row: row, expiry: expiry})
+	}
 	e.cacheMu.Lock()
 	defer e.cacheMu.Unlock()
-	for _, row := range tableRows(resp) {
-		e.collectLicenseRowLocked(report, unit, row)
+	for _, item := range parsed {
+		e.collectLicenseRowLocked(report, unit, item.row, item.expiry)
 	}
 	return nil
 }
 
-func (e *Exporter) collectLicenseRowLocked(report, unit string, row map[string]any) {
+func (e *Exporter) collectLicenseRowLocked(report, unit string, row map[string]any, expiry float64) {
 	licenseID := firstString(row, "License ID", "LicUsageType")
 	license := firstString(row, "License", "Dial")
 	summary := firstString(row, "Summary")
@@ -351,6 +384,12 @@ func (e *Exporter) collectLicenseRowLocked(report, unit string, row map[string]a
 		"eval_expiry_date", evalExpiryDate,
 	)
 	e.licenseInfo.With(infoLabels).Set(1)
+	e.licenseExpiry.With(e.baseLabels(
+		"license_id", licenseID,
+		"license", license,
+		"report", report,
+		"unit", unit,
+	)).Set(expiry)
 	for _, amount := range []struct {
 		kind string
 		base string
@@ -368,6 +407,18 @@ func (e *Exporter) collectLicenseRowLocked(report, unit string, row map[string]a
 			"kind", amount.kind,
 		)).Set(f(licenseColumnValue(row, amount.base, unit)))
 	}
+}
+
+func parseLicenseExpiryDate(value string) (float64, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, nil
+	}
+	expiry, err := time.ParseInLocation("02 Jan 2006", value, time.UTC)
+	if err != nil {
+		return 0, err
+	}
+	return float64(expiry.Unix()), nil
 }
 
 func licenseColumnValue(row map[string]any, base, unit string) any {
