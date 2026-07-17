@@ -389,6 +389,12 @@ func (e *Exporter) collectLibraries(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if len(inventory.LibraryList) == 0 {
+		if e.logger != nil {
+			e.logger.Warn("library inventory is empty", "collector", "storage", "subcollector", "libraries")
+		}
+		return nil
+	}
 	results := make([]libraryDetailResult, len(inventory.LibraryList))
 	jobs := make(chan int, len(inventory.LibraryList))
 	for index := range inventory.LibraryList {

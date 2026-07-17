@@ -396,12 +396,10 @@ func TestClientGetLibrariesAndDetails(t *testing.T) {
 		switch r.URL.Path {
 		case "/webconsole/api/Library":
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"libraryList": []map[string]any{{
-					"libraryType": 3,
-					"status":      "Ready",
-					"library": map[string]any{
-						"libraryId":   101,
-						"libraryName": "disk-library-a",
+				"response": []map[string]any{{
+					"entityInfo": map[string]any{
+						"id":   101,
+						"name": "disk-library-a",
 					},
 				}},
 			})
@@ -444,7 +442,7 @@ func TestClientGetLibrariesAndDetails(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(libraries.LibraryList) != 1 || libraries.LibraryList[0].Library.ID != 101 {
+	if len(libraries.LibraryList) != 1 || libraries.LibraryList[0].Library.ID != 101 || libraries.LibraryList[0].Library.Name != "disk-library-a" {
 		t.Fatalf("libraries = %#v", libraries.LibraryList)
 	}
 	details, err := client.GetLibraryDetails(context.Background(), 101)
@@ -453,5 +451,49 @@ func TestClientGetLibrariesAndDetails(t *testing.T) {
 	}
 	if len(details.LibraryInfo.MountPathList) != 1 || details.LibraryInfo.MountPathList[0].Status != "Ready (Disabled for write)" {
 		t.Fatalf("details = %#v", details)
+	}
+}
+
+func TestClientGetLibrariesSupportsLegacyListResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"libraryList": []map[string]any{{
+				"libraryType": 3,
+				"status":      "Ready",
+				"library": map[string]any{
+					"libraryId":   202,
+					"libraryName": "disk-library-b",
+				},
+			}},
+		})
+	}))
+	defer server.Close()
+
+	client, err := NewClient(Config{BaseURL: server.URL, AuthToken: "token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	libraries, err := client.GetLibraries(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(libraries.LibraryList) != 1 || libraries.LibraryList[0].Library.ID != 202 || libraries.LibraryList[0].Library.Name != "disk-library-b" {
+		t.Fatalf("libraries = %#v", libraries.LibraryList)
+	}
+}
+
+func TestClientGetLibrariesRejectsUnknownEnvelope(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"unexpected":[]}`))
+	}))
+	defer server.Close()
+
+	client, err := NewClient(Config{BaseURL: server.URL, AuthToken: "token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.GetLibraries(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "neither libraryList nor response") {
+		t.Fatalf("GetLibraries error = %v", err)
 	}
 }

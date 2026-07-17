@@ -392,8 +392,26 @@ func (c *Client) GetLibraries(ctx context.Context) (LibrariesResponse, error) {
 		return LibrariesResponse{}, err
 	}
 	var resp LibrariesResponse
-	err := c.do(ctx, http.MethodGet, "Library", nil, nil, nil, &resp, true)
-	return resp, err
+	if err := c.do(ctx, http.MethodGet, "Library", nil, nil, nil, &resp, true); err != nil {
+		return LibrariesResponse{}, err
+	}
+	switch {
+	case resp.LibraryList != nil:
+		return resp, nil
+	case resp.Response != nil:
+		resp.LibraryList = make([]LibraryListItem, 0, len(resp.Response))
+		for _, item := range resp.Response {
+			resp.LibraryList = append(resp.LibraryList, LibraryListItem{
+				Library: LibraryRef{
+					ID:   item.EntityInfo.ID,
+					Name: item.EntityInfo.Name,
+				},
+			})
+		}
+		return resp, nil
+	default:
+		return LibrariesResponse{}, errors.New("commvault library inventory response contains neither libraryList nor response")
+	}
 }
 
 func (c *Client) GetLibraryDetails(ctx context.Context, libraryID int64) (LibraryDetailsResponse, error) {

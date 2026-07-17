@@ -1,6 +1,7 @@
 package collector
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"log/slog"
@@ -349,12 +350,10 @@ func TestExporterLibraryMetrics(t *testing.T) {
 		switch r.URL.Path {
 		case "/webconsole/api/Library":
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"libraryList": []map[string]any{{
-					"libraryType": 3,
-					"status":      "",
-					"library": map[string]any{
-						"libraryId":   101,
-						"libraryName": "disk-library-a",
+				"response": []map[string]any{{
+					"entityInfo": map[string]any{
+						"id":   101,
+						"name": "disk-library-a",
 					},
 				}},
 			})
@@ -434,6 +433,27 @@ commvault_mount_path_used_for_log_caching{library="disk-library-a",library_id="1
 		"commvault_mount_path_used_for_log_caching",
 	); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestExporterLibrariesWarnsOnEmptyInventory(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"response": []any{}})
+	}))
+	defer server.Close()
+
+	client, err := commvault.NewClient(commvault.Config{BaseURL: server.URL, AuthToken: "token", Timeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	exporter := New(config.Default(), client, logger)
+	if err := exporter.collectLibraries(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := logs.String(); !strings.Contains(got, "library inventory is empty") || !strings.Contains(got, "subcollector=libraries") {
+		t.Fatalf("logs = %q", got)
 	}
 }
 

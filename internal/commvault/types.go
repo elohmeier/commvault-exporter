@@ -286,6 +286,9 @@ type MediaAgentsResponse struct {
 
 type LibrariesResponse struct {
 	LibraryList []LibraryListItem `json:"libraryList"`
+	Response    []struct {
+		EntityInfo IDName `json:"entityInfo"`
+	} `json:"response"`
 }
 
 type LibraryListItem struct {
