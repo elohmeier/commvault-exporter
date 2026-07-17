@@ -334,6 +334,22 @@ func (c *Client) GetTriggeredAlerts(ctx context.Context) (TriggeredAlertsRespons
 	return resp, err
 }
 
+func (c *Client) GetEvents(ctx context.Context, fromTime, toTime int64) (EventsResponse, error) {
+	if err := c.EnsureLogin(ctx); err != nil {
+		return EventsResponse{}, err
+	}
+	query := url.Values{}
+	if fromTime > 0 {
+		query.Set("fromTime", strconv.FormatInt(fromTime, 10))
+	}
+	if toTime > 0 {
+		query.Set("toTime", strconv.FormatInt(toTime, 10))
+	}
+	var resp EventsResponse
+	err := c.do(ctx, http.MethodGet, "Events", query, nil, nil, &resp, true)
+	return resp, err
+}
+
 func (c *Client) GetLicenseInfo(ctx context.Context) (LicenseInfoResponse, error) {
 	if err := c.EnsureLogin(ctx); err != nil {
 		return LicenseInfoResponse{}, err
@@ -368,6 +384,25 @@ func (c *Client) GetMediaAgents(ctx context.Context) (MediaAgentsResponse, error
 	}
 	var resp MediaAgentsResponse
 	err := c.do(ctx, http.MethodGet, "cc:MediaAgent", nil, nil, nil, &resp, true)
+	return resp, err
+}
+
+func (c *Client) GetLibraries(ctx context.Context) (LibrariesResponse, error) {
+	if err := c.EnsureLogin(ctx); err != nil {
+		return LibrariesResponse{}, err
+	}
+	var resp LibrariesResponse
+	err := c.do(ctx, http.MethodGet, "Library", nil, nil, nil, &resp, true)
+	return resp, err
+}
+
+func (c *Client) GetLibraryDetails(ctx context.Context, libraryID int64) (LibraryDetailsResponse, error) {
+	if err := c.EnsureLogin(ctx); err != nil {
+		return LibraryDetailsResponse{}, err
+	}
+	query := url.Values{"propertyLevel": []string{"20"}}
+	var resp LibraryDetailsResponse
+	err := c.do(ctx, http.MethodGet, "Library/"+strconv.FormatInt(libraryID, 10), query, nil, nil, &resp, true)
 	return resp, err
 }
 

@@ -30,7 +30,7 @@ var (
 var reservedCustomLabelNames = []string{
 	"alert", "alert_id", "app", "backup_level", "category", "client", "collector", "commcell", "copies", "criterion",
 	"commcell_id", "deleted", "dial", "edition", "entity", "eval_expiry_date", "guid", "health_status", "job_id", "job_type", "kind",
-	"library", "library_id", "license", "license_id", "media_agent", "media_agent_id", "operation", "os", "plans",
+	"event_code", "event_type", "library", "library_id", "license", "license_id", "media_agent", "media_agent_id", "mount_path", "mount_path_id", "operation", "os", "plans",
 	"license_mode", "policy", "policy_id", "pool", "pool_id",
 	"proxy_client", "read", "release", "severity", "status", "status_name", "subclient", "type", "version",
 	"report", "summary", "unit", "vm", "vsa_client",
@@ -65,6 +65,7 @@ func run(args []string, stdout io.Writer, stderr io.Writer) int {
 		refreshInterval        time.Duration
 		refreshTimeout         time.Duration
 		maxStale               time.Duration
+		eventLookback          time.Duration
 		ignoreCert             bool
 		showVersion            bool
 		debug                  bool
@@ -82,6 +83,7 @@ func run(args []string, stdout io.Writer, stderr io.Writer) int {
 	flags.DurationVar(&refreshInterval, "refresh-interval", 0, "Background cache refresh interval (default: 5m)")
 	flags.DurationVar(&refreshTimeout, "refresh-timeout", 0, "Background cache refresh timeout (default: 2m)")
 	flags.DurationVar(&maxStale, "max-stale", 0, "Maximum cache age before readiness fails (default: 15m)")
+	flags.DurationVar(&eventLookback, "event-lookback", 0, "Commvault event lookup window (default: 24h)")
 	flags.BoolVar(&ignoreCert, "ignore-cert", false, "Disable TLS certificate verification")
 	flags.StringVar(&caFile, "ca-file", "", "Path to a custom CA certificate bundle")
 	flags.BoolVar(&showVersion, "version", false, "Display application version")
@@ -163,6 +165,11 @@ func run(args []string, stdout io.Writer, stderr io.Writer) int {
 	cfg.MaxStale, err = config.ChooseDuration(maxStale, config.GetMaxStale(), cfg.MaxStale, "max-stale")
 	if err != nil {
 		logger.Error("invalid max stale", "err", err)
+		return 1
+	}
+	cfg.EventLookback, err = config.ChooseDuration(eventLookback, config.GetEventLookback(), cfg.EventLookback, "event-lookback")
+	if err != nil {
+		logger.Error("invalid event lookback", "err", err)
 		return 1
 	}
 	if caFile == "" {

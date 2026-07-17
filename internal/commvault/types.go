@@ -211,6 +211,29 @@ type TriggeredAlert struct {
 	} `json:"commcell"`
 }
 
+type EventsResponse struct {
+	CommservEvents []Event `json:"commservEvents"`
+}
+
+type Event struct {
+	Severity        int    `json:"severity"`
+	EventCodeString string `json:"eventCodeString"`
+	JobID           int64  `json:"jobId"`
+	Subsystem       string `json:"subsystem"`
+	Description     string `json:"description"`
+	ID              int64  `json:"id"`
+	TimeSource      int64  `json:"timeSource"`
+	ClientName      string `json:"clientName"`
+	ClientEntity    Entity `json:"clientEntity"`
+}
+
+func (e Event) EffectiveClientName() string {
+	if name := e.ClientEntity.EntityName(); name != "" {
+		return name
+	}
+	return e.ClientName
+}
+
 type IDName struct {
 	ID   int64  `json:"id"`
 	Name string `json:"name"`
@@ -259,4 +282,61 @@ type MediaAgentsResponse struct {
 	Response []struct {
 		EntityInfo IDName `json:"entityInfo"`
 	} `json:"response"`
+}
+
+type LibrariesResponse struct {
+	LibraryList []LibraryListItem `json:"libraryList"`
+}
+
+type LibraryListItem struct {
+	Description  string             `json:"description"`
+	LibraryType  int64              `json:"libraryType"`
+	Manufacturer string             `json:"manufacturer"`
+	Model        string             `json:"model"`
+	Status       string             `json:"status"`
+	MagSummary   MagneticLibSummary `json:"magLibSummary"`
+	Library      LibraryRef         `json:"library"`
+}
+
+type LibraryRef struct {
+	ID   int64  `json:"libraryId"`
+	Name string `json:"libraryName"`
+}
+
+type LibraryDetailsResponse struct {
+	LibraryInfo LibraryInfo `json:"libraryInfo"`
+}
+
+type LibraryInfo struct {
+	Status        string             `json:"status"`
+	Model         string             `json:"model"`
+	Manufacturer  string             `json:"manufacturer"`
+	LibraryType   int64              `json:"libraryType"`
+	Description   string             `json:"description"`
+	MagSummary    MagneticLibSummary `json:"magLibSummary"`
+	MountPathList []MountPath        `json:"MountPathList"`
+	Library       LibraryRef         `json:"library"`
+}
+
+type MagneticLibSummary struct {
+	IsOnline              string `json:"isOnline"`
+	OnlineMountPaths      string `json:"onlineMountPaths"`
+	NumOfMountPath        int64  `json:"numOfMountPath"`
+	AssociatedMediaAgents string `json:"associatedMediaAgents"`
+}
+
+type MountPath struct {
+	Status                     string           `json:"status"`
+	Name                       string           `json:"mountPathName"`
+	ID                         int64            `json:"mountPathId"`
+	MediaAgents                string           `json:"mediaAgents"`
+	DriveID                    int64            `json:"driveId"`
+	DisabledForNewWrite        bool             `json:"disabledForNewWrite"`
+	MountPathUsedForLogCaching bool             `json:"mountPathUsedForLogCaching"`
+	Summary                    MountPathSummary `json:"mountPathSummary"`
+}
+
+type MountPathSummary struct {
+	LibraryName string `json:"libraryName"`
+	LibraryID   int64  `json:"libraryId"`
 }

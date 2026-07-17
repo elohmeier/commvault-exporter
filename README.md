@@ -38,6 +38,7 @@ The exporter listens on `:9720` by default.
 | `-refresh-timeout` | `COMMVAULT_REFRESH_TIMEOUT` | `2m` | Timeout for one full refresh. |
 | `-max-stale` | `COMMVAULT_MAX_STALE` | `15m` | Maximum cache age before readiness fails. |
 | `-job-completed-lookup-time` | `COMMVAULT_JOB_COMPLETED_LOOKUP_TIME` | `86400` | Commvault job lookup window in seconds. |
+| `-event-lookback` | `COMMVAULT_EVENT_LOOKBACK` | `24h` | Rolling window requested from the CommCell Events API. |
 | `-ignore-cert` | `COMMVAULT_IGNORE_CERT` | `false` | Disable TLS certificate verification. |
 | `-ca-file` | `COMMVAULT_CA_FILE` | none | Custom CA bundle path. |
 
@@ -47,7 +48,7 @@ Commvault Login API request.
 Set `COMMVAULT_AUTH_TOKEN` to use a pre-created token instead of logging in.
 
 Disable collectors by these names: `vm`, `dashboard`, `jobs`, `alerts`,
-`storage`, `licensing`.
+`events`, `storage`, `licensing`.
 
 Report-backed dashboard/storage/licensing endpoints are configurable because
 Commvault publishes some of them as report dataset paths. Override them with:
@@ -55,6 +56,55 @@ Commvault publishes some of them as report dataset paths. Override them with:
 `COMMVAULT_ENDPOINT_JOBS_24H`, `COMMVAULT_ENDPOINT_HEALTH_OVERVIEW`,
 `COMMVAULT_ENDPOINT_ENVIRONMENT`, `COMMVAULT_ENDPOINT_CURRENT_CAPACITY`, and
 `COMMVAULT_ENDPOINT_STORAGE_SPACE_USAGE`.
+
+## Storage access events and mount paths
+
+The `events` module reads the rolling `COMMVAULT_EVENT_LOOKBACK` window from
+the CommCell Events API. It exports only the storage-access event codes
+`64:1097`, `74:131`, `74:138`, and `36:326`:
+
+- `commvault_storage_access_event_count` is the number of matching events in
+  the current lookup window.
+- `commvault_storage_access_event_last_timestamp_seconds` is the most recent
+  event timestamp for the label set.
+- `commvault_storage_access_event_latest_attempts` contains the attempt count
+  parsed from the latest `64:1097` Storage Accelerator event.
+
+Events are aggregated by `event_code`, `event_type`, `severity`, `client`, and
+`mount_path`. Event IDs, job IDs, and descriptions are deliberately excluded
+from labels. An unrecognized `64:1097` description is still counted with an
+empty `mount_path`, but has no attempts metric.
+
+The `storage` module also reads the library inventory and complete detail for
+each library. Up to four detail requests run concurrently. It exports library
+and mount-path metadata plus these alert-oriented gauges:
+
+- `commvault_library_ready`
+- `commvault_library_mount_paths{kind="online|total"}`
+- `commvault_mount_path_ready`
+- `commvault_mount_path_disabled_for_new_write`
+- `commvault_mount_path_used_for_log_caching`
+
+A mount path such as `Ready (Disabled for write)` has
+`commvault_mount_path_ready == 1` and
+`commvault_mount_path_disabled_for_new_write == 1`. Storage Accelerator event
+`64:1097` reports client-specific access degradation and does not by itself
+mean that the library or mount path is offline.
+
+Example queries:
+
+```promql
+# Storage access event seen during the last 15 minutes.
+time() - commvault_storage_access_event_last_timestamp_seconds < 15 * 60
+
+# Libraries or mount paths whose current API state is not ready.
+commvault_library_ready == 0
+commvault_mount_path_ready == 0
+
+# Accessible mount paths that are intentionally disabled for new writes.
+commvault_mount_path_ready == 1
+and commvault_mount_path_disabled_for_new_write == 1
+```
 
 Licensing report endpoints can also be overridden with
 `COMMVAULT_ENDPOINT_LICENSE_OPERATING_INSTANCES`,

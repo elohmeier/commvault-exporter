@@ -19,6 +19,7 @@ type Config struct {
 	RefreshInterval        time.Duration
 	RefreshTimeout         time.Duration
 	MaxStale               time.Duration
+	EventLookback          time.Duration
 	PageSize               int
 	JobCompletedLookupTime int
 	AuthMode               string
@@ -49,6 +50,7 @@ func Default() Config {
 		RefreshInterval:        5 * time.Minute,
 		RefreshTimeout:         2 * time.Minute,
 		MaxStale:               15 * time.Minute,
+		EventLookback:          24 * time.Hour,
 		PageSize:               1000,
 		JobCompletedLookupTime: 86400,
 		AuthMode:               "authtoken",
@@ -113,6 +115,8 @@ func GetRefreshInterval() string { return os.Getenv("COMMVAULT_REFRESH_INTERVAL"
 func GetRefreshTimeout() string { return os.Getenv("COMMVAULT_REFRESH_TIMEOUT") }
 
 func GetMaxStale() string { return os.Getenv("COMMVAULT_MAX_STALE") }
+
+func GetEventLookback() string { return os.Getenv("COMMVAULT_EVENT_LOOKBACK") }
 
 func GetPageSize() string { return os.Getenv("COMMVAULT_PAGE_SIZE") }
 

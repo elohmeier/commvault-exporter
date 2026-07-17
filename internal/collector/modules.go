@@ -4,12 +4,25 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/elohmeier/commvault-exporter/internal/commvault"
 )
+
+const libraryDetailWorkers = 4
+
+var storageAcceleratorEventPattern = regexp.MustCompile(`(?i)due to the mount path (.+?) is not accessible for ([0-9]+) attempts`)
+
+var storageEventTypes = map[string]string{
+	"64:1097": "storage_accelerator_inaccessible",
+	"74:131":  "media_mount_unmount_error",
+	"74:138":  "mount_path_offline",
+	"36:326":  "mount_unmount_timeout",
+}
 
 func (e *Exporter) collectVMs(ctx context.Context) error {
 	vms, err := e.client.GetVMs(ctx)
@@ -225,6 +238,88 @@ func (e *Exporter) collectAlerts(ctx context.Context) error {
 	return nil
 }
 
+type storageEventKey struct {
+	Code      string
+	Type      string
+	Severity  string
+	Client    string
+	MountPath string
+}
+
+type storageEventAggregate struct {
+	Count       int
+	Latest      int64
+	Attempts    int64
+	HasAttempts bool
+}
+
+func (e *Exporter) collectEvents(ctx context.Context) error {
+	now := time.Now()
+	resp, err := e.client.GetEvents(ctx, now.Add(-e.cfg.EventLookback).Unix(), now.Unix())
+	if err != nil {
+		return err
+	}
+	aggregates := aggregateStorageEvents(resp.CommservEvents)
+	e.cacheMu.Lock()
+	defer e.cacheMu.Unlock()
+	for key, aggregate := range aggregates {
+		labels := e.baseLabels(
+			"event_code", key.Code,
+			"event_type", key.Type,
+			"severity", key.Severity,
+			"client", key.Client,
+			"mount_path", key.MountPath,
+		)
+		e.storageAccessEvents.With(labels).Set(float64(aggregate.Count))
+		e.storageAccessLast.With(labels).Set(float64(aggregate.Latest))
+		if aggregate.HasAttempts {
+			e.storageAccessTries.With(labels).Set(float64(aggregate.Attempts))
+		}
+	}
+	return nil
+}
+
+func aggregateStorageEvents(events []commvault.Event) map[storageEventKey]storageEventAggregate {
+	aggregates := make(map[storageEventKey]storageEventAggregate)
+	for _, event := range events {
+		eventType, ok := storageEventTypes[event.EventCodeString]
+		if !ok {
+			continue
+		}
+		key := storageEventKey{
+			Code:     event.EventCodeString,
+			Type:     eventType,
+			Severity: strconv.Itoa(event.Severity),
+			Client:   event.EffectiveClientName(),
+		}
+		attempts, hasAttempts := int64(0), false
+		if event.EventCodeString == "64:1097" {
+			key.MountPath, attempts, hasAttempts = parseStorageAcceleratorDescription(event.Description)
+		}
+		aggregate := aggregates[key]
+		aggregate.Count++
+		if event.TimeSource >= aggregate.Latest {
+			aggregate.Latest = event.TimeSource
+			aggregate.Attempts = attempts
+			aggregate.HasAttempts = hasAttempts
+		}
+		aggregates[key] = aggregate
+	}
+	return aggregates
+}
+
+func parseStorageAcceleratorDescription(description string) (string, int64, bool) {
+	match := storageAcceleratorEventPattern.FindStringSubmatch(description)
+	if len(match) != 3 {
+		return "", 0, false
+	}
+	attempts, err := strconv.ParseInt(match[2], 10, 64)
+	if err != nil {
+		return strings.TrimSpace(match[1]), 0, false
+	}
+	return strings.TrimSpace(match[1]), attempts, true
+}
+
 func (e *Exporter) collectStorage(ctx context.Context) error {
 	var pools commvault.StoragePoolsResponse
 	var policies commvault.StoragePoliciesResponse
@@ -251,6 +346,7 @@ func (e *Exporter) collectStorage(ctx context.Context) error {
 			spaceUsage, err = e.client.GetTabular(ctx, e.cfg.Paths.StorageSpaceUsage)
 			return err
 		}),
+		e.runSubcollector(ctx, "storage", "libraries", e.collectLibraries),
 	}
 	e.cacheMu.Lock()
 	defer e.cacheMu.Unlock()
@@ -280,6 +376,144 @@ func (e *Exporter) collectStorage(ctx context.Context) error {
 		e.libraryFreeRatio.With(e.baseLabels("library_id", libraryID, "library", library, "health_status", health)).Set(f(row["FreeSpacePercentage"]) / 100)
 	}
 	return errors.Join(errs...)
+}
+
+type libraryDetailResult struct {
+	inventory commvault.LibraryListItem
+	details   commvault.LibraryDetailsResponse
+	err       error
+}
+
+func (e *Exporter) collectLibraries(ctx context.Context) error {
+	inventory, err := e.client.GetLibraries(ctx)
+	if err != nil {
+		return err
+	}
+	results := make([]libraryDetailResult, len(inventory.LibraryList))
+	jobs := make(chan int, len(inventory.LibraryList))
+	for index := range inventory.LibraryList {
+		results[index].inventory = inventory.LibraryList[index]
+		jobs <- index
+	}
+	close(jobs)
+
+	workerCount := min(libraryDetailWorkers, len(results))
+	var workers sync.WaitGroup
+	workers.Add(workerCount)
+	for range workerCount {
+		go func() {
+			defer workers.Done()
+			for index := range jobs {
+				item := inventory.LibraryList[index]
+				results[index].details, results[index].err = e.client.GetLibraryDetails(ctx, item.Library.ID)
+			}
+		}()
+	}
+	workers.Wait()
+
+	var errs []error
+	e.cacheMu.Lock()
+	for _, result := range results {
+		if result.err != nil {
+			errs = append(errs, fmt.Errorf("library %d (%s): %w", result.inventory.Library.ID, result.inventory.Library.Name, result.err))
+			continue
+		}
+		e.collectLibraryMetrics(result.inventory, result.details)
+	}
+	e.cacheMu.Unlock()
+	return errors.Join(errs...)
+}
+
+func (e *Exporter) collectLibraryMetrics(inventory commvault.LibraryListItem, details commvault.LibraryDetailsResponse) {
+	info := details.LibraryInfo
+	libraryID := inventory.Library.ID
+	if info.Library.ID != 0 {
+		libraryID = info.Library.ID
+	}
+	libraryName := inventory.Library.Name
+	if info.Library.Name != "" {
+		libraryName = info.Library.Name
+	}
+	libraryType := inventory.LibraryType
+	if info.Library.Name != "" || len(info.MountPathList) > 0 || info.MagSummary.IsOnline != "" {
+		libraryType = info.LibraryType
+	}
+	status := firstNonEmpty(info.MagSummary.IsOnline, info.Status, inventory.MagSummary.IsOnline, inventory.Status)
+	libraryIDLabel := id(libraryID)
+	e.libraryInfo.With(e.baseLabels(
+		"library_id", libraryIDLabel,
+		"library", libraryName,
+		"type", id(libraryType),
+		"status", status,
+	)).Set(1)
+	e.libraryReady.With(e.baseLabels("library_id", libraryIDLabel, "library", libraryName)).Set(boolFloat(isHealthyLibraryStatus(status)))
+
+	totalMountPaths := info.MagSummary.NumOfMountPath
+	if totalMountPaths == 0 {
+		totalMountPaths = inventory.MagSummary.NumOfMountPath
+	}
+	e.libraryMountPaths.With(e.baseLabels("library_id", libraryIDLabel, "library", libraryName, "kind", "total")).Set(float64(totalMountPaths))
+	if online, ok := parseOnlineMountPaths(firstNonEmpty(info.MagSummary.OnlineMountPaths, inventory.MagSummary.OnlineMountPaths)); ok {
+		e.libraryMountPaths.With(e.baseLabels("library_id", libraryIDLabel, "library", libraryName, "kind", "online")).Set(float64(online))
+	}
+
+	for _, mountPath := range info.MountPathList {
+		mountLibraryID := libraryID
+		if mountPath.Summary.LibraryID != 0 {
+			mountLibraryID = mountPath.Summary.LibraryID
+		}
+		mountLibraryName := libraryName
+		if mountPath.Summary.LibraryName != "" {
+			mountLibraryName = mountPath.Summary.LibraryName
+		}
+		labels := e.baseLabels(
+			"library_id", id(mountLibraryID),
+			"library", mountLibraryName,
+			"mount_path_id", id(mountPath.ID),
+			"mount_path", mountPath.Name,
+		)
+		infoLabels := e.baseLabels(
+			"library_id", id(mountLibraryID),
+			"library", mountLibraryName,
+			"mount_path_id", id(mountPath.ID),
+			"mount_path", mountPath.Name,
+			"status", strings.TrimSpace(mountPath.Status),
+		)
+		e.mountPathInfo.With(infoLabels).Set(1)
+		e.mountPathReady.With(labels).Set(boolFloat(strings.HasPrefix(strings.ToLower(strings.TrimSpace(mountPath.Status)), "ready")))
+		e.mountPathWriteOff.With(labels).Set(boolFloat(mountPath.DisabledForNewWrite))
+		e.mountPathLogCaching.With(labels).Set(boolFloat(mountPath.MountPathUsedForLogCaching))
+	}
+}
+
+func parseOnlineMountPaths(value string) (int64, bool) {
+	parts := strings.Fields(strings.TrimSpace(value))
+	if len(parts) != 4 || !strings.EqualFold(parts[1], "out") || !strings.EqualFold(parts[2], "of") {
+		return 0, false
+	}
+	online, err := strconv.ParseInt(parts[0], 10, 64)
+	return online, err == nil
+}
+
+func isHealthyLibraryStatus(status string) bool {
+	status = strings.TrimSpace(status)
+	return strings.EqualFold(status, "ready") || strings.EqualFold(status, "online")
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func boolFloat(value bool) float64 {
+	if value {
+		return 1
+	}
+	return 0
 }
 
 func (e *Exporter) collectLicensing(ctx context.Context) error {

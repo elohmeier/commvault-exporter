@@ -69,6 +69,9 @@ type Exporter struct {
 	alertTriggeredTime  *prometheus.GaugeVec
 	alertTriggeredCount *prometheus.GaugeVec
 	alertUnreadCount    *prometheus.GaugeVec
+	storageAccessEvents *prometheus.GaugeVec
+	storageAccessLast   *prometheus.GaugeVec
+	storageAccessTries  *prometheus.GaugeVec
 	storagePoolInfo     *prometheus.GaugeVec
 	storagePoolCapacity *prometheus.GaugeVec
 	storagePoolFree     *prometheus.GaugeVec
@@ -81,6 +84,13 @@ type Exporter struct {
 	licenseAmount       *prometheus.GaugeVec
 	librarySpace        *prometheus.GaugeVec
 	libraryFreeRatio    *prometheus.GaugeVec
+	libraryInfo         *prometheus.GaugeVec
+	libraryReady        *prometheus.GaugeVec
+	libraryMountPaths   *prometheus.GaugeVec
+	mountPathInfo       *prometheus.GaugeVec
+	mountPathReady      *prometheus.GaugeVec
+	mountPathWriteOff   *prometheus.GaugeVec
+	mountPathLogCaching *prometheus.GaugeVec
 
 	commcellLicenseExpiry *prometheus.GaugeVec
 	licenseExpiry         *prometheus.GaugeVec
@@ -131,6 +141,9 @@ func New(cfg config.Config, client *commvault.Client, logger *slog.Logger) *Expo
 	}
 	if cfg.MaxStale <= 0 {
 		cfg.MaxStale = defaults.MaxStale
+	}
+	if cfg.EventLookback <= 0 {
+		cfg.EventLookback = defaults.EventLookback
 	}
 	if cfg.PageSize <= 0 {
 		cfg.PageSize = defaults.PageSize
@@ -188,6 +201,9 @@ func New(cfg config.Config, client *commvault.Client, logger *slog.Logger) *Expo
 		alertTriggeredTime:  g("alert_triggered_detected_time_seconds", "Commvault triggered alert detected timestamp.", []string{"alert_id", "severity", "type", "criterion", "client", "job_id", "commcell", "read"}),
 		alertTriggeredCount: g("alert_triggered_count", "Commvault triggered alert count by severity and type.", []string{"severity", "type"}),
 		alertUnreadCount:    g("alert_unread_count", "Commvault unread triggered alert count.", nil),
+		storageAccessEvents: g("storage_access_event_count", "Commvault storage access events in the configured lookup window.", []string{"event_code", "event_type", "severity", "client", "mount_path"}),
+		storageAccessLast:   g("storage_access_event_last_timestamp_seconds", "Unix timestamp of the latest matching Commvault storage access event.", []string{"event_code", "event_type", "severity", "client", "mount_path"}),
+		storageAccessTries:  g("storage_access_event_latest_attempts", "Attempt count reported by the latest matching Commvault storage access event.", []string{"event_code", "event_type", "severity", "client", "mount_path"}),
 		storagePoolInfo:     g("storage_pool_info", "Commvault storage pool metadata.", []string{"pool_id", "pool", "status", "type", "client_group"}),
 		storagePoolCapacity: g("storage_pool_capacity_bytes", "Commvault storage pool total capacity in bytes.", []string{"pool_id", "pool"}),
 		storagePoolFree:     g("storage_pool_free_bytes", "Commvault storage pool free bytes.", []string{"pool_id", "pool"}),
@@ -200,6 +216,13 @@ func New(cfg config.Config, client *commvault.Client, logger *slog.Logger) *Expo
 		licenseAmount:       g("license_amount", "Commvault license amount by report, license, unit, and kind.", []string{"license_id", "license", "report", "unit", "kind"}),
 		librarySpace:        g("library_space_bytes", "Commvault library space by kind.", []string{"library_id", "library", "health_status", "kind"}),
 		libraryFreeRatio:    g("library_free_ratio", "Commvault library free-space ratio.", []string{"library_id", "library", "health_status"}),
+		libraryInfo:         g("library_info", "Commvault library metadata from the library inventory and details APIs.", []string{"library_id", "library", "type", "status"}),
+		libraryReady:        g("library_ready", "Whether the Commvault library reports a Ready or Online state.", []string{"library_id", "library"}),
+		libraryMountPaths:   g("library_mount_paths", "Commvault library mount path count by kind.", []string{"library_id", "library", "kind"}),
+		mountPathInfo:       g("mount_path_info", "Commvault mount path metadata.", []string{"library_id", "library", "mount_path_id", "mount_path", "status"}),
+		mountPathReady:      g("mount_path_ready", "Whether the Commvault mount path status begins with Ready.", []string{"library_id", "library", "mount_path_id", "mount_path"}),
+		mountPathWriteOff:   g("mount_path_disabled_for_new_write", "Whether the Commvault mount path is disabled for new writes.", []string{"library_id", "library", "mount_path_id", "mount_path"}),
+		mountPathLogCaching: g("mount_path_used_for_log_caching", "Whether the Commvault mount path is used for log caching.", []string{"library_id", "library", "mount_path_id", "mount_path"}),
 
 		commcellLicenseExpiry: g("commcell_license_expiry_timestamp_seconds", "Unix timestamp when the current CommCell license expires; 0 means no expiry was supplied.", []string{"commcell_id", "edition", "license_mode"}),
 		licenseExpiry:         g("license_expiry_timestamp_seconds", "Unix timestamp of the license expiry reported by Commvault; 0 means no expiry was supplied.", []string{"license_id", "license", "report", "unit"}),
@@ -269,6 +292,7 @@ func (e *Exporter) RefreshOnce(ctx context.Context) error {
 		e.runModule(ctx, "dashboard", e.collectDashboard),
 		e.runModule(ctx, "jobs", e.collectJobs),
 		e.runModule(ctx, "alerts", e.collectAlerts),
+		e.runModule(ctx, "events", e.collectEvents),
 		e.runModule(ctx, "storage", e.collectStorage),
 		e.runModule(ctx, "licensing", e.collectLicensing),
 	}
@@ -455,8 +479,10 @@ func (e *Exporter) allCollectors() []prometheus.Collector {
 		e.commcellInfo, e.slaStatusCount, e.jobs24hCount, e.healthStatusCount, e.entityCount,
 		e.jobInfo, e.jobStatus, e.jobPercentComplete, e.jobElapsed, e.jobStart, e.jobLastUpdate, e.jobSizeApplication, e.jobFailedFiles,
 		e.alertConfigInfo, e.alertTriggeredInfo, e.alertTriggeredTime, e.alertTriggeredCount, e.alertUnreadCount,
+		e.storageAccessEvents, e.storageAccessLast, e.storageAccessTries,
 		e.storagePoolInfo, e.storagePoolCapacity, e.storagePoolFree, e.storagePolicyInfo, e.storagePolicyStream, e.mediaAgentInfo,
 		e.capacityUsage, e.capacityExpiry, e.commcellLicenseExpiry, e.licenseInfo, e.licenseAmount, e.licenseExpiry, e.librarySpace, e.libraryFreeRatio,
+		e.libraryInfo, e.libraryReady, e.libraryMountPaths, e.mountPathInfo, e.mountPathReady, e.mountPathWriteOff, e.mountPathLogCaching,
 	}
 }
 
@@ -468,8 +494,10 @@ func (e *Exporter) resetDataMetrics() {
 		e.commcellInfo, e.slaStatusCount, e.jobs24hCount, e.healthStatusCount, e.entityCount,
 		e.jobInfo, e.jobStatus, e.jobPercentComplete, e.jobElapsed, e.jobStart, e.jobLastUpdate, e.jobSizeApplication, e.jobFailedFiles,
 		e.alertConfigInfo, e.alertTriggeredInfo, e.alertTriggeredTime, e.alertTriggeredCount, e.alertUnreadCount,
+		e.storageAccessEvents, e.storageAccessLast, e.storageAccessTries,
 		e.storagePoolInfo, e.storagePoolCapacity, e.storagePoolFree, e.storagePolicyInfo, e.storagePolicyStream, e.mediaAgentInfo,
 		e.capacityUsage, e.capacityExpiry, e.commcellLicenseExpiry, e.licenseInfo, e.licenseAmount, e.licenseExpiry, e.librarySpace, e.libraryFreeRatio,
+		e.libraryInfo, e.libraryReady, e.libraryMountPaths, e.mountPathInfo, e.mountPathReady, e.mountPathWriteOff, e.mountPathLogCaching,
 	} {
 		collector.Reset()
 	}

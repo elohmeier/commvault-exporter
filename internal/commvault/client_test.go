@@ -126,14 +126,14 @@ func TestClientGetLicenseInfo(t *testing.T) {
 			t.Fatalf("Authtoken = %q", got)
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"commCellId":         1063328,
-			"commServeIPAddress": "10.203.33.1",
-			"licenseIPAddress":   "255.255.255.255",
+			"commCellId":         42,
+			"commServeIPAddress": "192.0.2.10",
+			"licenseIPAddress":   "192.0.2.11",
 			"edition":            "Commvault",
 			"licenseMode":        "PRODUCTION",
 			"serialNumber":       "redacted",
 			"registrationCode":   "redacted",
-			"expiryDate":         1829969940,
+			"expiryDate":         1893456000,
 		})
 	}))
 	defer server.Close()
@@ -146,7 +146,7 @@ func TestClientGetLicenseInfo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if license.CommCellID != 1063328 || license.Edition != "Commvault" || license.LicenseMode != "PRODUCTION" || license.ExpiryDate != 1829969940 {
+	if license.CommCellID != 42 || license.Edition != "Commvault" || license.LicenseMode != "PRODUCTION" || license.ExpiryDate != 1893456000 {
 		t.Fatalf("license = %#v", license)
 	}
 }
@@ -307,7 +307,7 @@ func TestClientGetTabularAllowsWarnings(t *testing.T) {
 			"totalRecordCount": 1,
 			"failures":         map[string]any{},
 			"warnings": map[string]any{
-				"dasi-prod-ac4-1": []any{"Warning: Null value is eliminated by an aggregate or other SET operation."},
+				"commcell-example": []any{"Warning: Null value is eliminated by an aggregate or other SET operation."},
 			},
 		})
 	}))
@@ -344,5 +344,114 @@ func TestClientBearerAuthMode(t *testing.T) {
 	}
 	if _, err := client.GetVMs(context.Background()); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestClientGetEvents(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/webconsole/api/Events" {
+			t.Fatalf("path = %s", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("fromTime"); got != "100" {
+			t.Fatalf("fromTime = %q, want 100", got)
+		}
+		if got := r.URL.Query().Get("toTime"); got != "200" {
+			t.Fatalf("toTime = %q, want 200", got)
+		}
+		if got := r.Header.Get("Authtoken"); got != "token" {
+			t.Fatalf("Authtoken = %q", got)
+		}
+		_, _ = w.Write([]byte(`{
+			"commservEvents":[{
+				"severity":6,
+				"eventCode":"1073742921",
+				"eventCodeString":"64:1097",
+				"description":"Storage accelerator is disabled due to the mount path mount-root-a\u002fcopy-set-01 is not accessible for 8 attempts",
+				"timeSource":150,
+				"clientEntity":{"clientId":101,"clientName":"client-a"}
+			}]
+		}`))
+	}))
+	defer server.Close()
+
+	client, err := NewClient(Config{BaseURL: server.URL, AuthToken: "token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := client.GetEvents(context.Background(), 100, 200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.CommservEvents) != 1 {
+		t.Fatalf("events = %#v", resp.CommservEvents)
+	}
+	event := resp.CommservEvents[0]
+	if event.EventCodeString != "64:1097" || event.EffectiveClientName() != "client-a" || !strings.Contains(event.Description, "mount-root-a/copy-set-01") {
+		t.Fatalf("event = %#v", event)
+	}
+}
+
+func TestClientGetLibrariesAndDetails(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/webconsole/api/Library":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"libraryList": []map[string]any{{
+					"libraryType": 3,
+					"status":      "Ready",
+					"library": map[string]any{
+						"libraryId":   101,
+						"libraryName": "disk-library-a",
+					},
+				}},
+			})
+		case "/webconsole/api/Library/101":
+			if got := r.URL.Query().Get("propertyLevel"); got != "20" {
+				t.Fatalf("propertyLevel = %q, want 20", got)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"libraryInfo": map[string]any{
+					"libraryType": 3,
+					"magLibSummary": map[string]any{
+						"isOnline":         "Ready",
+						"onlineMountPaths": "1 out of 1",
+						"numOfMountPath":   1,
+					},
+					"MountPathList": []map[string]any{{
+						"mountPathId":                201,
+						"mountPathName":              "[media-agent-a] mount-path-a",
+						"status":                     "Ready (Disabled for write)",
+						"disabledForNewWrite":        true,
+						"mountPathUsedForLogCaching": true,
+					}},
+					"library": map[string]any{
+						"libraryId":   101,
+						"libraryName": "disk-library-a",
+					},
+				},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client, err := NewClient(Config{BaseURL: server.URL, AuthToken: "token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	libraries, err := client.GetLibraries(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(libraries.LibraryList) != 1 || libraries.LibraryList[0].Library.ID != 101 {
+		t.Fatalf("libraries = %#v", libraries.LibraryList)
+	}
+	details, err := client.GetLibraryDetails(context.Background(), 101)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(details.LibraryInfo.MountPathList) != 1 || details.LibraryInfo.MountPathList[0].Status != "Ready (Disabled for write)" {
+		t.Fatalf("details = %#v", details)
 	}
 }

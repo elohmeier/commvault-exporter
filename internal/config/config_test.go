@@ -52,6 +52,9 @@ func TestDefaultReportPathsAndJobWindow(t *testing.T) {
 	if cfg.JobCompletedLookupTime != 86400 {
 		t.Fatalf("JobCompletedLookupTime = %d, want 86400", cfg.JobCompletedLookupTime)
 	}
+	if cfg.EventLookback != 24*time.Hour {
+		t.Fatalf("EventLookback = %s, want 24h", cfg.EventLookback)
+	}
 	for name, path := range map[string]string{
 		"CommcellDetails":   cfg.Paths.CommcellDetails,
 		"SLA":               cfg.Paths.SLA,
@@ -77,6 +80,20 @@ func TestDefaultReportPathsAndJobWindow(t *testing.T) {
 	}
 	if cfg.Paths.Environment != "" {
 		t.Fatalf("Environment path = %q, want no default", cfg.Paths.Environment)
+	}
+}
+
+func TestGetEventLookback(t *testing.T) {
+	t.Setenv("COMMVAULT_EVENT_LOOKBACK", "168h")
+	if got := GetEventLookback(); got != "168h" {
+		t.Fatalf("GetEventLookback() = %q, want 168h", got)
+	}
+	if got, err := ChooseDuration(0, GetEventLookback(), 24*time.Hour, "event-lookback"); err != nil || got != 7*24*time.Hour {
+		t.Fatalf("event lookback = %s, %v; want 168h", got, err)
+	}
+	t.Setenv("COMMVAULT_EVENT_LOOKBACK", "not-a-duration")
+	if _, err := ChooseDuration(0, GetEventLookback(), 24*time.Hour, "event-lookback"); err == nil {
+		t.Fatal("invalid event lookback error = nil")
 	}
 }
 
