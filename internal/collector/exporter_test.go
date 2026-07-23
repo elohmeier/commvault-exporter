@@ -398,7 +398,15 @@ func TestExporterLibraryMetrics(t *testing.T) {
 		t.Fatal(err)
 	}
 	reg := prometheus.NewRegistry()
-	reg.MustRegister(exporter)
+	reg.MustRegister(
+		exporter.libraryInfo,
+		exporter.libraryMountPaths,
+		exporter.libraryReady,
+		exporter.mountPathWriteOff,
+		exporter.mountPathInfo,
+		exporter.mountPathReady,
+		exporter.mountPathLogCaching,
+	)
 	expected := `
 # HELP commvault_library_info Commvault library metadata from the library inventory and details APIs.
 # TYPE commvault_library_info gauge
@@ -723,7 +731,7 @@ func TestExporterCommcellLicenseEmitsZeroExpiry(t *testing.T) {
 		t.Fatal(err)
 	}
 	reg := prometheus.NewRegistry()
-	reg.MustRegister(exporter)
+	reg.MustRegister(exporter.commcellLicenseExpiry)
 	expected := `
 # HELP commvault_commcell_license_expiry_timestamp_seconds Unix timestamp when the current CommCell license expires; 0 means no expiry was supplied.
 # TYPE commvault_commcell_license_expiry_timestamp_seconds gauge

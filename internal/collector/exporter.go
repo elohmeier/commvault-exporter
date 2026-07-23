@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"net/http"
 	"sort"
 	"strconv"
@@ -20,28 +21,52 @@ import (
 
 const namespace = "commvault"
 
+var moduleNames = []string{"vm", "dashboard", "jobs", "alerts", "events", "storage", "licensing"}
+
+var coreModuleNames = map[string]bool{
+	"vm": true, "dashboard": true, "jobs": true, "alerts": true, "events": true,
+}
+
+const initialRetryDelay = 15 * time.Second
+
 type Exporter struct {
 	cfg       config.Config
 	client    *commvault.Client
 	logger    *slog.Logger
 	labelKeys []string
 
-	refreshMu       sync.Mutex
-	cacheMu         sync.Mutex
-	startOnce       sync.Once
-	schedulerCancel context.CancelFunc
-	moduleStates    map[string]*moduleState
+	refreshMu           sync.Mutex
+	cacheMu             sync.Mutex
+	startOnce           sync.Once
+	schedulerCancel     context.CancelFunc
+	moduleStates        map[string]*moduleState
+	moduleSnapshots     map[string]moduleSnapshot
+	dataTemplate        *dataMetrics
+	hasRefresh          bool
+	lastCompleteSuccess time.Time
+	consecutiveErrs     int
+	nextAttempt         time.Time
+	now                 func() time.Time
+	jitter              func(time.Duration) time.Duration
+	retryBase           time.Duration
 
-	up                 *prometheus.GaugeVec
-	refreshDuration    *prometheus.GaugeVec
-	refreshTotal       *prometheus.CounterVec
-	refreshErrorsTotal *prometheus.CounterVec
-	collectorUp        *prometheus.GaugeVec
-	subcollectorUp     *prometheus.GaugeVec
-	cacheLastAttempt   *prometheus.GaugeVec
-	cacheLastSuccess   *prometheus.GaugeVec
-	cacheAge           *prometheus.GaugeVec
-	cacheStale         *prometheus.GaugeVec
+	up                   *prometheus.GaugeVec
+	refreshDuration      *prometheus.GaugeVec
+	refreshTotal         *prometheus.CounterVec
+	refreshErrorsTotal   *prometheus.CounterVec
+	collectorUp          *prometheus.GaugeVec
+	subcollectorUp       *prometheus.GaugeVec
+	cacheLastAttempt     *prometheus.GaugeVec
+	cacheLastSuccess     *prometheus.GaugeVec
+	cacheAge             *prometheus.GaugeVec
+	cacheStale           *prometheus.GaugeVec
+	refreshConsecutive   *prometheus.GaugeVec
+	refreshInProgress    *prometheus.GaugeVec
+	refreshNextAttempt   *prometheus.GaugeVec
+	collectorDuration    *prometheus.GaugeVec
+	collectorLastSuccess *prometheus.GaugeVec
+	collectorCacheAge    *prometheus.GaugeVec
+	collectorCacheStale  *prometheus.GaugeVec
 
 	vmInfo              *prometheus.GaugeVec
 	vmStatus            *prometheus.GaugeVec
@@ -106,14 +131,21 @@ type moduleState struct {
 	LastError    string        `json:"last_error,omitempty"`
 }
 
+type moduleSnapshot struct {
+	Collectors []prometheus.Collector
+	Published  time.Time
+}
+
 type cacheStatus struct {
-	Ready           bool                `json:"ready"`
-	LastAttemptUnix int64               `json:"last_attempt_unix,omitempty"`
-	LastSuccessUnix int64               `json:"last_success_unix,omitempty"`
-	AgeSeconds      float64             `json:"age_seconds"`
-	MaxStaleSeconds float64             `json:"max_stale_seconds"`
-	Stale           bool                `json:"stale"`
-	Modules         []cacheModuleStatus `json:"modules"`
+	Ready             bool                `json:"ready"`
+	LastAttemptUnix   int64               `json:"last_attempt_unix,omitempty"`
+	LastSuccessUnix   int64               `json:"last_success_unix,omitempty"`
+	AgeSeconds        float64             `json:"age_seconds"`
+	MaxStaleSeconds   float64             `json:"max_stale_seconds"`
+	Stale             bool                `json:"stale"`
+	ConsecutiveErrors int                 `json:"consecutive_errors"`
+	NextAttemptUnix   int64               `json:"next_attempt_unix,omitempty"`
+	Modules           []cacheModuleStatus `json:"modules"`
 }
 
 type cacheModuleStatus struct {
@@ -126,6 +158,8 @@ type cacheModuleStatus struct {
 	Attempts            uint64  `json:"attempts"`
 	Errors              uint64  `json:"errors"`
 	LastError           string  `json:"last_error,omitempty"`
+	Required            bool    `json:"required"`
+	Published           bool    `json:"published"`
 }
 
 func New(cfg config.Config, client *commvault.Client, logger *slog.Logger) *Exporter {
@@ -158,94 +192,68 @@ func New(cfg config.Config, client *commvault.Client, logger *slog.Logger) *Expo
 		return prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: namespace, Name: name, Help: help}, withBaseLabels(cfg, labels))
 	}
 	e := &Exporter{
-		cfg:          cfg,
-		client:       client,
-		logger:       logger,
-		labelKeys:    cfg.LabelKeys(),
-		moduleStates: make(map[string]*moduleState),
+		cfg:             cfg,
+		client:          client,
+		logger:          logger,
+		labelKeys:       cfg.LabelKeys(),
+		moduleStates:    make(map[string]*moduleState),
+		moduleSnapshots: make(map[string]moduleSnapshot),
+		now:             time.Now,
+		retryBase:       initialRetryDelay,
+		jitter: func(delay time.Duration) time.Duration {
+			return time.Duration(float64(delay) * (0.8 + rand.Float64()*0.4))
+		},
 
-		up:                 g("up", "Whether the last Commvault background refresh completed without collector errors.", nil),
-		refreshDuration:    g("refresh_duration_seconds", "Duration of the last Commvault background refresh.", nil),
-		refreshTotal:       c("refresh_total", "Total Commvault background refresh attempts.", nil),
-		refreshErrorsTotal: c("refresh_errors_total", "Total Commvault background refresh failures.", nil),
-		collectorUp:        g("collector_up", "Whether the named Commvault collector completed successfully during the last refresh.", []string{"collector"}),
-		subcollectorUp:     g("subcollector_up", "Whether the named Commvault subcollector completed successfully during the last refresh.", []string{"collector", "subcollector"}),
-		cacheLastAttempt:   g("cache_last_attempt_timestamp_seconds", "Unix timestamp of the last Commvault cache refresh attempt.", nil),
-		cacheLastSuccess:   g("cache_last_success_timestamp_seconds", "Unix timestamp of the last successful Commvault cache refresh.", nil),
-		cacheAge:           g("cache_age_seconds", "Age of the cached Commvault data currently served.", nil),
-		cacheStale:         g("cache_stale", "1 when the cached Commvault data is stale or missing.", nil),
-
-		vmInfo:              g("vm_info", "Commvault VM inventory metadata.", []string{"vm", "guid", "client", "subclient", "proxy_client", "vsa_client", "os", "deleted"}),
-		vmStatus:            g("vm_status", "Commvault VM backup status code.", []string{"vm", "guid", "status", "status_name"}),
-		vmStatusCount:       g("vm_status_count", "Commvault VM count by backup status.", []string{"status", "status_name"}),
-		vmSize:              g("vm_size_bytes", "Commvault VM allocated size in bytes.", []string{"vm", "guid"}),
-		vmUsed:              g("vm_used_space_bytes", "Commvault VM used disk space in bytes.", []string{"vm", "guid"}),
-		vmGuest:             g("vm_guest_space_bytes", "Commvault VM guest-used space in bytes.", []string{"vm", "guid"}),
-		vmBackupStart:       g("vm_last_backup_start_time_seconds", "Commvault VM last backup start timestamp.", []string{"vm", "guid"}),
-		vmBackupEnd:         g("vm_last_backup_end_time_seconds", "Commvault VM last backup end timestamp.", []string{"vm", "guid"}),
-		commcellInfo:        g("commcell_info", "Commvault CommCell metadata.", []string{"commcell", "version", "release"}),
-		slaStatusCount:      g("sla_status_count", "Commvault SLA status counts.", []string{"commcell", "status"}),
-		jobs24hCount:        g("jobs_24h_count", "Commvault dashboard job counts for the current 24h window.", []string{"commcell", "status"}),
-		healthStatusCount:   g("health_status_count", "Commvault health overview counts.", []string{"commcell", "status"}),
-		entityCount:         g("environment_entity_count", "Commvault environment entity counts.", []string{"commcell", "entity"}),
-		jobInfo:             g("job_info", "Commvault job metadata.", []string{"job_id", "job_type", "operation", "status", "client", "app", "subclient", "backup_level"}),
-		jobStatus:           g("job_status", "Commvault job status as a one-hot gauge.", []string{"job_id", "status"}),
-		jobPercentComplete:  g("job_percent_complete", "Commvault job percent complete.", []string{"job_id"}),
-		jobElapsed:          g("job_elapsed_seconds", "Commvault job elapsed seconds.", []string{"job_id"}),
-		jobStart:            g("job_start_time_seconds", "Commvault job start timestamp.", []string{"job_id"}),
-		jobLastUpdate:       g("job_last_update_time_seconds", "Commvault job last update timestamp.", []string{"job_id"}),
-		jobSizeApplication:  g("job_size_application_bytes", "Commvault job application size in bytes.", []string{"job_id"}),
-		jobFailedFiles:      g("job_failed_files", "Commvault job failed file count.", []string{"job_id"}),
-		alertConfigInfo:     g("alert_config_info", "Commvault configured alert metadata.", []string{"alert_id", "alert", "type", "category", "creator", "status"}),
-		alertTriggeredInfo:  g("alert_triggered_info", "Commvault triggered alert metadata.", []string{"alert_id", "severity", "type", "criterion", "client", "job_id", "commcell", "read"}),
-		alertTriggeredTime:  g("alert_triggered_detected_time_seconds", "Commvault triggered alert detected timestamp.", []string{"alert_id", "severity", "type", "criterion", "client", "job_id", "commcell", "read"}),
-		alertTriggeredCount: g("alert_triggered_count", "Commvault triggered alert count by severity and type.", []string{"severity", "type"}),
-		alertUnreadCount:    g("alert_unread_count", "Commvault unread triggered alert count.", nil),
-		storageAccessEvents: g("storage_access_event_count", "Commvault storage access events in the configured lookup window.", []string{"event_code", "event_type", "severity", "client", "mount_path"}),
-		storageAccessLast:   g("storage_access_event_last_timestamp_seconds", "Unix timestamp of the latest matching Commvault storage access event.", []string{"event_code", "event_type", "severity", "client", "mount_path"}),
-		storageAccessTries:  g("storage_access_event_latest_attempts", "Attempt count reported by the latest matching Commvault storage access event.", []string{"event_code", "event_type", "severity", "client", "mount_path"}),
-		storagePoolInfo:     g("storage_pool_info", "Commvault storage pool metadata.", []string{"pool_id", "pool", "status", "type", "client_group"}),
-		storagePoolCapacity: g("storage_pool_capacity_bytes", "Commvault storage pool total capacity in bytes.", []string{"pool_id", "pool"}),
-		storagePoolFree:     g("storage_pool_free_bytes", "Commvault storage pool free bytes.", []string{"pool_id", "pool"}),
-		storagePolicyInfo:   g("storage_policy_info", "Commvault storage policy metadata.", []string{"policy_id", "policy", "type", "copies", "plans"}),
-		storagePolicyStream: g("storage_policy_streams", "Commvault storage policy stream count.", []string{"policy_id", "policy"}),
-		mediaAgentInfo:      g("media_agent_info", "Commvault media agent metadata.", []string{"media_agent_id", "media_agent"}),
-		capacityUsage:       g("capacity_usage", "Commvault capacity usage by dial.", []string{"dial", "kind"}),
-		capacityExpiry:      g("capacity_license_expiry_timestamp_seconds", "Unix timestamp of the capacity license expiry reported by Commvault; 0 means no expiry was supplied.", []string{"dial"}),
-		licenseInfo:         g("license_info", "Commvault license report metadata.", []string{"license_id", "license", "report", "unit", "summary", "eval_expiry_date"}),
-		licenseAmount:       g("license_amount", "Commvault license amount by report, license, unit, and kind.", []string{"license_id", "license", "report", "unit", "kind"}),
-		librarySpace:        g("library_space_bytes", "Commvault library space by kind.", []string{"library_id", "library", "health_status", "kind"}),
-		libraryFreeRatio:    g("library_free_ratio", "Commvault library free-space ratio.", []string{"library_id", "library", "health_status"}),
-		libraryInfo:         g("library_info", "Commvault library metadata from the library inventory and details APIs.", []string{"library_id", "library", "type", "status"}),
-		libraryReady:        g("library_ready", "Whether the Commvault library reports a Ready or Online state.", []string{"library_id", "library"}),
-		libraryMountPaths:   g("library_mount_paths", "Commvault library mount path count by kind.", []string{"library_id", "library", "kind"}),
-		mountPathInfo:       g("mount_path_info", "Commvault mount path metadata.", []string{"library_id", "library", "mount_path_id", "mount_path", "status"}),
-		mountPathReady:      g("mount_path_ready", "Whether the Commvault mount path status begins with Ready.", []string{"library_id", "library", "mount_path_id", "mount_path"}),
-		mountPathWriteOff:   g("mount_path_disabled_for_new_write", "Whether the Commvault mount path is disabled for new writes.", []string{"library_id", "library", "mount_path_id", "mount_path"}),
-		mountPathLogCaching: g("mount_path_used_for_log_caching", "Whether the Commvault mount path is used for log caching.", []string{"library_id", "library", "mount_path_id", "mount_path"}),
-
-		commcellLicenseExpiry: g("commcell_license_expiry_timestamp_seconds", "Unix timestamp when the current CommCell license expires; 0 means no expiry was supplied.", []string{"commcell_id", "edition", "license_mode"}),
-		licenseExpiry:         g("license_expiry_timestamp_seconds", "Unix timestamp of the license expiry reported by Commvault; 0 means no expiry was supplied.", []string{"license_id", "license", "report", "unit"}),
+		up:                   g("up", "Whether the last Commvault background refresh completed without collector errors.", nil),
+		refreshDuration:      g("refresh_duration_seconds", "Duration of the last Commvault background refresh.", nil),
+		refreshTotal:         c("refresh_total", "Total Commvault background refresh attempts.", nil),
+		refreshErrorsTotal:   c("refresh_errors_total", "Total Commvault background refresh failures.", nil),
+		collectorUp:          g("collector_up", "Whether the named Commvault collector completed successfully during the last refresh.", []string{"collector"}),
+		subcollectorUp:       g("subcollector_up", "Whether the named Commvault subcollector completed successfully during the last refresh.", []string{"collector", "subcollector"}),
+		cacheLastAttempt:     g("cache_last_attempt_timestamp_seconds", "Unix timestamp of the last Commvault cache refresh attempt.", nil),
+		cacheLastSuccess:     g("cache_last_success_timestamp_seconds", "Unix timestamp of the oldest successful required collector snapshot.", nil),
+		cacheAge:             g("cache_age_seconds", "Age of the oldest required collector snapshot currently served.", nil),
+		cacheStale:           g("cache_stale", "1 when a required collector snapshot is stale or missing.", nil),
+		refreshConsecutive:   g("refresh_consecutive_errors", "Number of consecutive background refresh cycles with collector errors.", nil),
+		refreshInProgress:    g("refresh_in_progress", "1 while a background refresh cycle is running.", nil),
+		refreshNextAttempt:   g("refresh_next_attempt_timestamp_seconds", "Unix timestamp of the next scheduled background refresh attempt; 0 while refreshing or stopped.", nil),
+		collectorDuration:    g("collector_duration_seconds", "Duration of the latest collector attempt.", []string{"collector"}),
+		collectorLastSuccess: g("collector_last_success_timestamp_seconds", "Unix timestamp of the latest successful collector snapshot.", []string{"collector"}),
+		collectorCacheAge:    g("collector_cache_age_seconds", "Age of the latest successful collector snapshot.", []string{"collector"}),
+		collectorCacheStale:  g("collector_cache_stale", "1 when the collector snapshot is stale or missing.", []string{"collector"}),
 	}
+	data := newDataMetrics(cfg)
+	e.dataTemplate = data
+	e.useDataMetrics(data)
 	e.up.With(e.baseLabels()).Set(0)
 	e.cacheStale.With(e.baseLabels()).Set(1)
 	e.cacheAge.With(e.baseLabels()).Set(0)
 	e.cacheLastAttempt.With(e.baseLabels()).Set(0)
 	e.cacheLastSuccess.With(e.baseLabels()).Set(0)
 	e.refreshDuration.With(e.baseLabels()).Set(0)
+	e.refreshConsecutive.With(e.baseLabels()).Set(0)
+	e.refreshInProgress.With(e.baseLabels()).Set(0)
+	e.refreshNextAttempt.With(e.baseLabels()).Set(0)
 	return e
 }
 
 func (e *Exporter) Describe(ch chan<- *prometheus.Desc) {
-	for _, collector := range e.allCollectors() {
+	for _, collector := range append(e.statusCollectors(), e.dataTemplate.allCollectors()...) {
 		collector.Describe(ch)
 	}
 }
 
 func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 	e.cacheMu.Lock()
-	e.updateDynamicCacheMetricsLocked(time.Now())
-	collectors := e.allCollectors()
+	now := e.now()
+	e.updateDynamicCacheMetricsLocked(now)
+	collectors := e.statusCollectors()
+	for _, module := range moduleNames {
+		snapshot, ok := e.moduleSnapshots[module]
+		if ok && now.Sub(snapshot.Published) <= e.cfg.MaxStale {
+			collectors = append(collectors, snapshot.Collectors...)
+		}
+	}
 	e.cacheMu.Unlock()
 	for _, collector := range collectors {
 		collector.Collect(ch)
@@ -280,81 +288,157 @@ func (e *Exporter) RefreshOnce(ctx context.Context) error {
 		ctx, cancel = context.WithTimeout(ctx, e.cfg.RefreshTimeout)
 		defer cancel()
 	}
-	start := time.Now()
+	start := e.now()
 	e.cacheMu.Lock()
 	e.cacheLastAttempt.With(e.baseLabels()).Set(float64(start.Unix()))
 	e.refreshTotal.With(e.baseLabels()).Inc()
+	e.refreshInProgress.With(e.baseLabels()).Set(1)
+	e.refreshNextAttempt.With(e.baseLabels()).Set(0)
 	e.cacheMu.Unlock()
 
-	e.resetDataMetrics()
-	results := []bool{
-		e.runModule(ctx, "vm", e.collectVMs),
-		e.runModule(ctx, "dashboard", e.collectDashboard),
-		e.runModule(ctx, "jobs", e.collectJobs),
-		e.runModule(ctx, "alerts", e.collectAlerts),
-		e.runModule(ctx, "events", e.collectEvents),
-		e.runModule(ctx, "storage", e.collectStorage),
-		e.runModule(ctx, "licensing", e.collectLicensing),
+	staging := newDataMetrics(e.cfg)
+	e.useDataMetrics(staging)
+	type moduleSpec struct {
+		name string
+		fn   func(context.Context) error
 	}
-	failed := false
-	for _, r := range results {
-		if !r {
-			failed = true
+	specs := []moduleSpec{
+		{name: "vm", fn: e.collectVMs},
+		{name: "dashboard", fn: e.collectDashboard},
+		{name: "jobs", fn: e.collectJobs},
+		{name: "alerts", fn: e.collectAlerts},
+		{name: "events", fn: e.collectEvents},
+		{name: "storage", fn: e.collectStorage},
+		{name: "licensing", fn: e.collectLicensing},
+	}
+	results := make(chan bool, len(specs))
+	var wg sync.WaitGroup
+	enabled := 0
+	for _, spec := range specs {
+		if e.cfg.IsModuleDisabled(spec.name) {
+			continue
 		}
+		enabled++
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			results <- e.runModule(ctx, spec.name, spec.fn, staging.moduleCollectors(spec.name))
+		}()
 	}
-	duration := time.Since(start)
+	wg.Wait()
+	close(results)
+	failed := false
+	for result := range results {
+		failed = failed || !result
+	}
+	duration := e.now().Sub(start)
 	e.cacheMu.Lock()
 	defer e.cacheMu.Unlock()
+	e.hasRefresh = true
 	e.refreshDuration.With(e.baseLabels()).Set(duration.Seconds())
+	e.refreshInProgress.With(e.baseLabels()).Set(0)
+	if enabled == 0 {
+		failed = false
+	}
 	if failed {
 		e.up.With(e.baseLabels()).Set(0)
 		e.refreshErrorsTotal.With(e.baseLabels()).Inc()
+		e.consecutiveErrs++
+		e.refreshConsecutive.With(e.baseLabels()).Set(float64(e.consecutiveErrs))
 		return fmt.Errorf("one or more collectors failed")
 	}
 	e.up.With(e.baseLabels()).Set(1)
-	e.cacheLastSuccess.With(e.baseLabels()).Set(float64(time.Now().Unix()))
+	e.consecutiveErrs = 0
+	e.lastCompleteSuccess = e.now()
+	e.refreshConsecutive.With(e.baseLabels()).Set(0)
+	e.updateDynamicCacheMetricsLocked(e.now())
 	return nil
 }
 
 func (e *Exporter) ReadyHandler(w http.ResponseWriter, _ *http.Request) {
-	status := e.cacheStatus(time.Now())
+	status := e.cacheStatus(e.now())
+	w.Header().Set("Content-Type", "application/json")
 	if !status.Ready {
 		w.WriteHeader(http.StatusServiceUnavailable)
 	} else {
 		w.WriteHeader(http.StatusOK)
 	}
-	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(status)
 }
 
 func (e *Exporter) DebugCacheHandler(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(e.cacheStatus(time.Now()))
+	_ = json.NewEncoder(w).Encode(e.cacheStatus(e.now()))
 }
 
 func (e *Exporter) schedulerLoop(ctx context.Context) {
-	if err := e.RefreshOnce(ctx); err != nil && e.logger != nil {
-		e.logger.Error("initial refresh failed", "err", err)
-	}
-	ticker := time.NewTicker(e.cfg.RefreshInterval)
-	defer ticker.Stop()
+	delay := time.Duration(0)
 	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			if err := e.RefreshOnce(ctx); err != nil && e.logger != nil {
-				e.logger.Error("refresh failed", "err", err)
+		if delay > 0 {
+			e.setNextAttempt(e.now().Add(delay))
+			timer := time.NewTimer(delay)
+			select {
+			case <-ctx.Done():
+				if !timer.Stop() {
+					<-timer.C
+				}
+				e.setNextAttempt(time.Time{})
+				return
+			case <-timer.C:
 			}
 		}
+		e.setNextAttempt(time.Time{})
+		err := e.RefreshOnce(ctx)
+		if ctx.Err() != nil {
+			e.setNextAttempt(time.Time{})
+			return
+		}
+		if err != nil {
+			if e.logger != nil {
+				e.logger.Error("refresh failed", "err", err)
+			}
+			delay = e.retryDelay()
+			continue
+		}
+		delay = e.cfg.RefreshInterval
 	}
 }
 
-func (e *Exporter) runModule(ctx context.Context, name string, fn func(context.Context) error) bool {
-	if e.cfg.IsModuleDisabled(name) {
-		return true
+func (e *Exporter) retryDelay() time.Duration {
+	e.cacheMu.Lock()
+	consecutive := e.consecutiveErrs
+	e.cacheMu.Unlock()
+	delay := e.retryBase
+	for i := 1; i < consecutive && delay < e.cfg.RefreshInterval; i++ {
+		if delay >= e.cfg.RefreshInterval/2 {
+			delay = e.cfg.RefreshInterval
+			break
+		}
+		delay *= 2
 	}
-	start := time.Now()
+	if delay > e.cfg.RefreshInterval {
+		delay = e.cfg.RefreshInterval
+	}
+	delay = e.jitter(delay)
+	if delay > e.cfg.RefreshInterval {
+		return e.cfg.RefreshInterval
+	}
+	return delay
+}
+
+func (e *Exporter) setNextAttempt(next time.Time) {
+	e.cacheMu.Lock()
+	defer e.cacheMu.Unlock()
+	e.nextAttempt = next
+	value := float64(0)
+	if !next.IsZero() {
+		value = float64(next.Unix())
+	}
+	e.refreshNextAttempt.With(e.baseLabels()).Set(value)
+}
+
+func (e *Exporter) runModule(ctx context.Context, name string, fn func(context.Context) error, collectors []prometheus.Collector) bool {
+	start := e.now()
 	e.cacheMu.Lock()
 	state := e.moduleStateLocked(name)
 	state.Attempts++
@@ -363,7 +447,8 @@ func (e *Exporter) runModule(ctx context.Context, name string, fn func(context.C
 	err := fn(ctx)
 	e.cacheMu.Lock()
 	defer e.cacheMu.Unlock()
-	state.LastDuration = time.Since(start)
+	state.LastDuration = e.now().Sub(start)
+	e.collectorDuration.With(e.baseLabels("collector", name)).Set(state.LastDuration.Seconds())
 	if err != nil {
 		state.Errors++
 		state.LastError = err.Error()
@@ -373,9 +458,11 @@ func (e *Exporter) runModule(ctx context.Context, name string, fn func(context.C
 		}
 		return false
 	}
-	state.LastSuccess = time.Now()
+	state.LastSuccess = e.now()
 	state.LastError = ""
 	e.collectorUp.With(e.baseLabels("collector", name)).Set(1)
+	e.collectorLastSuccess.With(e.baseLabels("collector", name)).Set(float64(state.LastSuccess.Unix()))
+	e.moduleSnapshots[name] = moduleSnapshot{Collectors: collectors, Published: state.LastSuccess}
 	return true
 }
 
@@ -406,22 +493,16 @@ func (e *Exporter) moduleStateLocked(name string) *moduleState {
 func (e *Exporter) cacheStatus(now time.Time) cacheStatus {
 	e.cacheMu.Lock()
 	defer e.cacheMu.Unlock()
-	lastSuccess := gaugeValue(e.cacheLastSuccess.With(e.baseLabels()))
+	e.updateDynamicCacheMetricsLocked(now)
+	ready, lastSuccess, age, stale := e.readinessLocked(now)
 	lastAttempt := gaugeValue(e.cacheLastAttempt.With(e.baseLabels()))
-	age := 0.0
-	stale := true
-	if lastSuccess > 0 {
-		age = now.Sub(time.Unix(int64(lastSuccess), 0)).Seconds()
-		stale = age > e.cfg.MaxStale.Seconds()
-	}
-	modules := make([]cacheModuleStatus, 0, len(e.moduleStates))
-	keys := make([]string, 0, len(e.moduleStates))
-	for name := range e.moduleStates {
-		keys = append(keys, name)
-	}
-	sort.Strings(keys)
-	for _, name := range keys {
-		state := e.moduleStates[name]
+	required := e.requiredModules()
+	modules := make([]cacheModuleStatus, 0, len(moduleNames))
+	for _, name := range moduleNames {
+		if e.cfg.IsModuleDisabled(name) {
+			continue
+		}
+		state := e.moduleStateLocked(name)
 		moduleAge := 0.0
 		moduleStale := true
 		if !state.LastSuccess.IsZero() {
@@ -445,61 +526,104 @@ func (e *Exporter) cacheStatus(now time.Time) cacheStatus {
 			Attempts:            state.Attempts,
 			Errors:              state.Errors,
 			LastError:           state.LastError,
+			Required:            required[name],
+			Published:           !state.LastSuccess.IsZero(),
 		})
 	}
+	nextAttemptUnix := int64(0)
+	if !e.nextAttempt.IsZero() {
+		nextAttemptUnix = e.nextAttempt.Unix()
+	}
+	lastSuccessUnix := int64(0)
+	if !lastSuccess.IsZero() {
+		lastSuccessUnix = lastSuccess.Unix()
+	}
 	return cacheStatus{
-		Ready:           lastSuccess > 0 && !stale,
-		LastAttemptUnix: int64(lastAttempt),
-		LastSuccessUnix: int64(lastSuccess),
-		AgeSeconds:      age,
-		MaxStaleSeconds: e.cfg.MaxStale.Seconds(),
-		Stale:           stale,
-		Modules:         modules,
+		Ready:             ready,
+		LastAttemptUnix:   int64(lastAttempt),
+		LastSuccessUnix:   lastSuccessUnix,
+		AgeSeconds:        age,
+		MaxStaleSeconds:   e.cfg.MaxStale.Seconds(),
+		Stale:             stale,
+		ConsecutiveErrors: e.consecutiveErrs,
+		NextAttemptUnix:   nextAttemptUnix,
+		Modules:           modules,
 	}
 }
 
 func (e *Exporter) updateDynamicCacheMetricsLocked(now time.Time) {
-	lastSuccess := gaugeValue(e.cacheLastSuccess.With(e.baseLabels()))
-	age := 0.0
-	stale := 1.0
-	if lastSuccess > 0 {
-		age = now.Sub(time.Unix(int64(lastSuccess), 0)).Seconds()
-		if age <= e.cfg.MaxStale.Seconds() {
-			stale = 0
+	_, lastSuccess, age, stale := e.readinessLocked(now)
+	lastSuccessValue := float64(0)
+	if !lastSuccess.IsZero() {
+		lastSuccessValue = float64(lastSuccess.Unix())
+	}
+	e.cacheLastSuccess.With(e.baseLabels()).Set(lastSuccessValue)
+	e.cacheAge.With(e.baseLabels()).Set(age)
+	e.cacheStale.With(e.baseLabels()).Set(boolFloat(stale))
+	for _, name := range moduleNames {
+		if e.cfg.IsModuleDisabled(name) {
+			continue
+		}
+		snapshot, ok := e.moduleSnapshots[name]
+		moduleAge := 0.0
+		moduleStale := true
+		if ok {
+			moduleAge = now.Sub(snapshot.Published).Seconds()
+			moduleStale = moduleAge > e.cfg.MaxStale.Seconds()
+		}
+		e.collectorCacheAge.With(e.baseLabels("collector", name)).Set(moduleAge)
+		e.collectorCacheStale.With(e.baseLabels("collector", name)).Set(boolFloat(moduleStale))
+	}
+}
+
+func (e *Exporter) readinessLocked(now time.Time) (bool, time.Time, float64, bool) {
+	required := e.requiredModules()
+	if len(required) == 0 {
+		if !e.hasRefresh || e.lastCompleteSuccess.IsZero() {
+			return false, time.Time{}, 0, true
+		}
+		age := now.Sub(e.lastCompleteSuccess).Seconds()
+		return age <= e.cfg.MaxStale.Seconds(), e.lastCompleteSuccess, age, age > e.cfg.MaxStale.Seconds()
+	}
+	var oldest time.Time
+	for name := range required {
+		snapshot, ok := e.moduleSnapshots[name]
+		if !ok {
+			return false, time.Time{}, 0, true
+		}
+		if oldest.IsZero() || snapshot.Published.Before(oldest) {
+			oldest = snapshot.Published
 		}
 	}
-	e.cacheAge.With(e.baseLabels()).Set(age)
-	e.cacheStale.With(e.baseLabels()).Set(stale)
+	age := now.Sub(oldest).Seconds()
+	stale := age > e.cfg.MaxStale.Seconds()
+	return !stale, oldest, age, stale
 }
 
-func (e *Exporter) allCollectors() []prometheus.Collector {
-	return []prometheus.Collector{
-		e.up, e.refreshDuration, e.refreshTotal, e.refreshErrorsTotal, e.collectorUp, e.subcollectorUp, e.cacheLastAttempt, e.cacheLastSuccess, e.cacheAge, e.cacheStale,
-		e.vmInfo, e.vmStatus, e.vmStatusCount, e.vmSize, e.vmUsed, e.vmGuest, e.vmBackupStart, e.vmBackupEnd,
-		e.commcellInfo, e.slaStatusCount, e.jobs24hCount, e.healthStatusCount, e.entityCount,
-		e.jobInfo, e.jobStatus, e.jobPercentComplete, e.jobElapsed, e.jobStart, e.jobLastUpdate, e.jobSizeApplication, e.jobFailedFiles,
-		e.alertConfigInfo, e.alertTriggeredInfo, e.alertTriggeredTime, e.alertTriggeredCount, e.alertUnreadCount,
-		e.storageAccessEvents, e.storageAccessLast, e.storageAccessTries,
-		e.storagePoolInfo, e.storagePoolCapacity, e.storagePoolFree, e.storagePolicyInfo, e.storagePolicyStream, e.mediaAgentInfo,
-		e.capacityUsage, e.capacityExpiry, e.commcellLicenseExpiry, e.licenseInfo, e.licenseAmount, e.licenseExpiry, e.librarySpace, e.libraryFreeRatio,
-		e.libraryInfo, e.libraryReady, e.libraryMountPaths, e.mountPathInfo, e.mountPathReady, e.mountPathWriteOff, e.mountPathLogCaching,
+func (e *Exporter) requiredModules() map[string]bool {
+	required := make(map[string]bool)
+	for _, name := range moduleNames {
+		if !e.cfg.IsModuleDisabled(name) && coreModuleNames[name] {
+			required[name] = true
+		}
 	}
+	if len(required) > 0 {
+		return required
+	}
+	for _, name := range moduleNames {
+		if !e.cfg.IsModuleDisabled(name) {
+			required[name] = true
+		}
+	}
+	return required
 }
 
-func (e *Exporter) resetDataMetrics() {
-	e.cacheMu.Lock()
-	defer e.cacheMu.Unlock()
-	for _, collector := range []interface{ Reset() }{
-		e.vmInfo, e.vmStatus, e.vmStatusCount, e.vmSize, e.vmUsed, e.vmGuest, e.vmBackupStart, e.vmBackupEnd,
-		e.commcellInfo, e.slaStatusCount, e.jobs24hCount, e.healthStatusCount, e.entityCount,
-		e.jobInfo, e.jobStatus, e.jobPercentComplete, e.jobElapsed, e.jobStart, e.jobLastUpdate, e.jobSizeApplication, e.jobFailedFiles,
-		e.alertConfigInfo, e.alertTriggeredInfo, e.alertTriggeredTime, e.alertTriggeredCount, e.alertUnreadCount,
-		e.storageAccessEvents, e.storageAccessLast, e.storageAccessTries,
-		e.storagePoolInfo, e.storagePoolCapacity, e.storagePoolFree, e.storagePolicyInfo, e.storagePolicyStream, e.mediaAgentInfo,
-		e.capacityUsage, e.capacityExpiry, e.commcellLicenseExpiry, e.licenseInfo, e.licenseAmount, e.licenseExpiry, e.librarySpace, e.libraryFreeRatio,
-		e.libraryInfo, e.libraryReady, e.libraryMountPaths, e.mountPathInfo, e.mountPathReady, e.mountPathWriteOff, e.mountPathLogCaching,
-	} {
-		collector.Reset()
+func (e *Exporter) statusCollectors() []prometheus.Collector {
+	return []prometheus.Collector{
+		e.up, e.refreshDuration, e.refreshTotal, e.refreshErrorsTotal, e.collectorUp, e.subcollectorUp,
+		e.cacheLastAttempt, e.cacheLastSuccess, e.cacheAge, e.cacheStale,
+		e.refreshConsecutive, e.refreshInProgress, e.refreshNextAttempt,
+		e.collectorDuration, e.collectorLastSuccess, e.collectorCacheAge, e.collectorCacheStale,
 	}
 }
 

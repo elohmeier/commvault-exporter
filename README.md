@@ -50,6 +50,38 @@ Set `COMMVAULT_AUTH_TOKEN` to use a pre-created token instead of logging in.
 Disable collectors by these names: `vm`, `dashboard`, `jobs`, `alerts`,
 `events`, `storage`, `licensing`.
 
+## Refreshes, caching, and readiness
+
+Enabled modules refresh concurrently while a global limit allows at most four
+Commvault API requests at once. A refresh writes each module into a staging
+snapshot. A successful module atomically replaces its previously published
+snapshot; a failed module keeps serving its last successful snapshot until it
+is older than `max-stale`.
+
+After a refresh cycle with any collector error, the exporter retries after 15
+seconds with exponential backoff and 20 percent jitter. The delay is capped at
+`refresh-interval` and resets after a completely successful cycle.
+
+`/readyz` requires fresh snapshots for the enabled core modules: `vm`,
+`dashboard`, `jobs`, `alerts`, and `events`. `storage` and `licensing` failures
+do not block readiness, but remain visible through `commvault_up`,
+`commvault_collector_up`, and the collector freshness metrics. If every core
+module is disabled, all remaining enabled modules become readiness-critical.
+
+Refresh and cache behavior is exposed through:
+
+- `commvault_refresh_consecutive_errors`
+- `commvault_refresh_in_progress`
+- `commvault_refresh_next_attempt_timestamp_seconds`
+- `commvault_collector_duration_seconds`
+- `commvault_collector_last_success_timestamp_seconds`
+- `commvault_collector_cache_age_seconds`
+- `commvault_collector_cache_stale`
+
+`commvault_up` remains all-or-nothing and is `1` only when every enabled module
+succeeded in the latest refresh cycle. `/debug/cache` shows the same state with
+per-module readiness and publication details.
+
 Report-backed dashboard/storage/licensing endpoints are configurable because
 Commvault publishes some of them as report dataset paths. Override them with:
 `COMMVAULT_ENDPOINT_COMMCELL_DETAILS`, `COMMVAULT_ENDPOINT_SLA`,

@@ -27,6 +27,8 @@ var (
 	newRequest     = http.NewRequestWithContext
 )
 
+const maxConcurrentRequests = 4
+
 type Config struct {
 	BaseURL            string
 	Username           string
@@ -52,6 +54,8 @@ type Client struct {
 	httpClient *http.Client
 	metrics    *Metrics
 	mu         sync.Mutex
+	loginMu    sync.Mutex
+	requestSem chan struct{}
 }
 
 type APIError struct {
@@ -130,6 +134,7 @@ func NewClient(cfg Config) (*Client, error) {
 		}).DialContext,
 		ForceAttemptHTTP2:     true,
 		MaxIdleConns:          100,
+		MaxConnsPerHost:       maxConcurrentRequests,
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
@@ -145,6 +150,7 @@ func NewClient(cfg Config) (*Client, error) {
 		userAgent:  cfg.UserAgent,
 		httpClient: &http.Client{Timeout: cfg.Timeout, Transport: transport},
 		metrics:    cfg.Metrics,
+		requestSem: make(chan struct{}, maxConcurrentRequests),
 	}, nil
 }
 
@@ -153,16 +159,24 @@ func (c *Client) Hostname() string {
 }
 
 func (c *Client) EnsureLogin(ctx context.Context) error {
+	c.loginMu.Lock()
+	defer c.loginMu.Unlock()
 	c.mu.Lock()
 	hasToken := c.token != ""
 	c.mu.Unlock()
 	if hasToken {
 		return nil
 	}
-	return c.Login(ctx)
+	return c.login(ctx)
 }
 
 func (c *Client) Login(ctx context.Context) error {
+	c.loginMu.Lock()
+	defer c.loginMu.Unlock()
+	return c.login(ctx)
+}
+
+func (c *Client) login(ctx context.Context) error {
 	if c.username == "" || c.password == "" {
 		return errors.New("credentials are required when COMMVAULT_AUTH_TOKEN is not set")
 	}
@@ -425,18 +439,40 @@ func (c *Client) GetLibraryDetails(ctx context.Context, libraryID int64) (Librar
 }
 
 func (c *Client) do(ctx context.Context, method, endpoint string, query url.Values, headers http.Header, body any, dest any, auth bool) error {
-	var reqBody io.Reader
+	var encoded []byte
 	if body != nil {
-		encoded, err := json.Marshal(body)
+		var err error
+		encoded, err = json.Marshal(body)
 		if err != nil {
 			return err
 		}
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		unauthorized, usedToken, err := c.doOnce(ctx, method, endpoint, query, headers, encoded, dest, auth)
+		if !unauthorized || !auth || attempt > 0 || c.username == "" || c.password == "" {
+			return err
+		}
+		c.mu.Lock()
+		if c.token == usedToken {
+			c.token = ""
+		}
+		c.mu.Unlock()
+		if err := c.EnsureLogin(ctx); err != nil {
+			return err
+		}
+	}
+	return errors.New("commvault request retry exhausted")
+}
+
+func (c *Client) doOnce(ctx context.Context, method, endpoint string, query url.Values, headers http.Header, encoded []byte, dest any, auth bool) (bool, string, error) {
+	var reqBody io.Reader
+	if encoded != nil {
 		reqBody = bytes.NewReader(encoded)
 	}
 	u := c.apiURL(endpoint, query)
 	req, err := newRequest(ctx, method, u.String(), reqBody)
 	if err != nil {
-		return err
+		return false, "", err
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Content-Type", "application/json")
@@ -446,48 +482,50 @@ func (c *Client) do(ctx context.Context, method, endpoint string, query url.Valu
 			req.Header.Add(key, value)
 		}
 	}
+	usedToken := ""
 	if auth {
 		c.mu.Lock()
-		token := c.token
+		usedToken = c.token
 		authMode := c.authMode
 		c.mu.Unlock()
 		switch authMode {
 		case "bearer":
-			req.Header.Set("Authorization", "Bearer "+token)
+			req.Header.Set("Authorization", "Bearer "+usedToken)
 		default:
-			req.Header.Set("Authtoken", token)
+			req.Header.Set("Authtoken", usedToken)
 		}
 	}
 
+	select {
+	case c.requestSem <- struct{}{}:
+		defer func() { <-c.requestSem }()
+	case <-ctx.Done():
+		return false, usedToken, ctx.Err()
+	}
 	start := time.Now()
 	resp, err := c.httpClient.Do(req)
 	elapsed := time.Since(start).Seconds()
 	if err != nil {
 		c.metrics.observe(endpoint, "error", elapsed)
-		return err
+		return false, usedToken, err
 	}
 	defer resp.Body.Close()
 	c.metrics.observe(endpoint, strconv.Itoa(resp.StatusCode), elapsed)
 
-	if auth && resp.StatusCode == http.StatusUnauthorized && c.username != "" && c.password != "" {
-		c.mu.Lock()
-		c.token = ""
-		c.mu.Unlock()
-		if err := c.Login(ctx); err != nil {
-			return err
-		}
-		return c.do(ctx, method, endpoint, query, headers, body, dest, auth)
+	if auth && resp.StatusCode == http.StatusUnauthorized {
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return true, usedToken, APIError{StatusCode: resp.StatusCode, Body: string(data)}
 	}
 	if resp.StatusCode >= 400 {
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return APIError{StatusCode: resp.StatusCode, Body: string(data)}
+		return false, usedToken, APIError{StatusCode: resp.StatusCode, Body: string(data)}
 	}
 	if dest == nil {
-		return nil
+		return false, usedToken, nil
 	}
 	decoder := json.NewDecoder(resp.Body)
 	decoder.UseNumber()
-	return decoder.Decode(dest)
+	return false, usedToken, decoder.Decode(dest)
 }
 
 func (c *Client) apiURL(endpoint string, query url.Values) url.URL {
