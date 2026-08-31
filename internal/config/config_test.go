@@ -56,17 +56,11 @@ func TestDefaultReportPathsAndJobWindow(t *testing.T) {
 		t.Fatalf("EventLookback = %s, want 24h", cfg.EventLookback)
 	}
 	for name, path := range map[string]string{
-		"CommcellDetails":   cfg.Paths.CommcellDetails,
-		"SLA":               cfg.Paths.SLA,
-		"Jobs24h":           cfg.Paths.Jobs24h,
-		"HealthOverview":    cfg.Paths.HealthOverview,
-		"StorageSpaceUsage": cfg.Paths.StorageSpaceUsage,
-	} {
-		if !strings.HasPrefix(path, "/CustomReportsEngine/rest/reportsplusengine/datasets/") {
-			t.Fatalf("%s path = %q, want documented report engine path", name, path)
-		}
-	}
-	for name, path := range map[string]string{
+		"CommcellDetails":           cfg.Paths.CommcellDetails,
+		"SLA":                       cfg.Paths.SLA,
+		"Jobs24h":                   cfg.Paths.Jobs24h,
+		"HealthOverview":            cfg.Paths.HealthOverview,
+		"StorageSpaceUsage":         cfg.Paths.StorageSpaceUsage,
 		"CurrentCapacity":           cfg.Paths.CurrentCapacity,
 		"LicenseOperatingInstances": cfg.Paths.LicenseOperatingInstances,
 		"LicenseEndpointUsers":      cfg.Paths.LicenseEndpointUsers,
@@ -74,9 +68,12 @@ func TestDefaultReportPathsAndJobWindow(t *testing.T) {
 		"LicenseAirGapProtect":      cfg.Paths.LicenseAirGapProtect,
 		"LicenseDataInsights":       cfg.Paths.LicenseDataInsights,
 	} {
-		if !strings.HasPrefix(path, "cc:cr/reportsplusengine/datasets/") {
-			t.Fatalf("%s path = %q, want documented Command Center report path", name, path)
+		if !strings.HasPrefix(path, "/CustomReportsEngine/rest/reportsplusengine/datasets/") {
+			t.Fatalf("%s path = %q, want documented report engine path", name, path)
 		}
+	}
+	if strings.Contains(cfg.Paths.CurrentCapacity, "TermDate") || strings.Contains(cfg.Paths.CurrentCapacity, "rawData") {
+		t.Fatalf("CurrentCapacity path = %q, want current report fields", cfg.Paths.CurrentCapacity)
 	}
 	if cfg.Paths.Environment != "" {
 		t.Fatalf("Environment path = %q, want no default", cfg.Paths.Environment)

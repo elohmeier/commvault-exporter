@@ -41,7 +41,7 @@ type Paths struct {
 	LicenseDataInsights       string
 }
 
-const licenseReportDataset = "cc:cr/reportsplusengine/datasets/d7faef75-cf66-40a2-98ce-a2d0cc2a144b:"
+const licenseReportDataset = "/CustomReportsEngine/rest/reportsplusengine/datasets/d7faef75-cf66-40a2-98ce-a2d0cc2a144b:"
 
 func Default() Config {
 	return Config{
@@ -59,13 +59,13 @@ func Default() Config {
 			SLA:                       "/CustomReportsEngine/rest/reportsplusengine/datasets/GetSLACounts/data?cache=true&parameter.i_DashboardType=commcell&datasource=2",
 			Jobs24h:                   "/CustomReportsEngine/rest/reportsplusengine/datasets/075e703a-b29f-46d6-ad29-7c1a60f7e4f3/data",
 			HealthOverview:            "/CustomReportsEngine/rest/reportsplusengine/datasets/b50b20ed-5fc4-4b4c-f7c4-fc6b84eb35cc/data",
-			CurrentCapacity:           licenseReportDataset + "feabb5ca-b6b7-4572-b0cb-39352c7e1b67/data/?offset=0&fields=[Dial] AS [Dial],[Purchased] AS [Purchased],[PermTotal] AS [PermTotal],[Eval] AS [Eval],[Usage] AS [Usage],[TermDate] AS [TermDate],[EvalExpiryDate] AS [EvalExpiryDate]&parameter.GUID=-1&limit=5&rawData=false",
+			CurrentCapacity:           licenseReportDataset + "feabb5ca-b6b7-4572-b0cb-39352c7e1b67/data?offset=0&fields=[Dial],[Purchased],[PermTotal],[Eval],[Usage],[EvalExpiryDate]&parameter.GUID=-1&limit=5",
 			StorageSpaceUsage:         "/CustomReportsEngine/rest/reportsplusengine/datasets/2b366703-52e1-4775-8047-1f4cfa13d2db/data",
-			LicenseOperatingInstances: licenseReportDataset + "cd38c52a-e099-4252-d36f-3e2c54540f6f/data/?offset=0&fields=[LicUsageType] AS [License ID],[Dial] AS [License],[Purchased] AS [Available Total (instances)],[PermTotal] AS [Permanent Purchased (instances)],[Eval] AS [Term Purchased (instances)],[Usage] AS [Used (instances)],[EvalExpiryDate] AS [EvalExpiryDate],[Summary] AS [Summary]&parameter.GUID=-1&limit=5",
-			LicenseEndpointUsers:      licenseReportDataset + "44cd7de8-ecb2-4ec8-8b2b-162491172eef/data/?offset=0&fields=[LicUsageType] AS [License ID],[Dial] AS [License],[Purchased] AS [Available Total (users)],[PermTotal] AS [Permanent Purchased (users)],[Eval] AS [Term Purchased (users)],[Usage] AS [Used (users)],[EvalExpiryDate] AS [EvalExpiryDate],[Summary] AS [Summary]&parameter.GUID=-1&limit=5",
-			LicenseHyperscaleStorage:  licenseReportDataset + "2654b01f-9bb0-481e-b273-4b4fddc585b1/data/?offset=0&fields=[LicUsageType] AS [License ID],[Dial] AS [License],[Purchased] AS [Available Total (TB)],[PermTotal] AS [Permanent Purchased (TB)],[Eval] AS [Term Purchased (TB)],[Usage] AS [Used (TB)],[EvalExpiryDate] AS [EvalExpiryDate],[Summary] AS [Summary]&parameter.GUID=-1&limit=10",
-			LicenseAirGapProtect:      licenseReportDataset + "cc2e77ec-9315-4446-cd7e-44ef80a8860e/data/?offset=0&fields=[LicUsageType] AS [License ID],[Dial] AS [License],[Purchased] AS [Available Total (TB)],[PermTotal] AS [Permanent Purchased (TB)],[Eval] AS [Term Purchased (TB)],[Usage] AS [Used (TB)],[EvalExpiryDate] AS [EvalExpiryDate],[Summary] AS [Summary]&parameter.GUID=-1&limit=20",
-			LicenseDataInsights:       licenseReportDataset + "f7c6b473-f99d-44b4-ff5e-466b55656500/data/?offset=0&fields=[LicUsageType] AS [License ID],[Dial] AS [License],[Purchased] AS [Available Total],[PermTotal] AS [Permanent Purchased],[Eval] AS [Term Purchased],[Usage] AS [Used],[EvalExpiryDate] AS [EvalExpiryDate],[Summary] AS [Summary]&parameter.GUID=-1&limit=20",
+			LicenseOperatingInstances: licenseReportDataset + "cd38c52a-e099-4252-d36f-3e2c54540f6f/data?offset=0&fields=[LicUsageType] AS [License ID],[Dial] AS [License],[Purchased] AS [Available Total (instances)],[PermTotal] AS [Permanent Purchased (instances)],[Eval] AS [Term Purchased (instances)],[Usage] AS [Used (instances)],[EvalExpiryDate] AS [EvalExpiryDate],[Summary] AS [Summary]&parameter.GUID=-1&limit=5",
+			LicenseEndpointUsers:      licenseReportDataset + "44cd7de8-ecb2-4ec8-8b2b-162491172eef/data?offset=0&fields=[LicUsageType] AS [License ID],[Dial] AS [License],[Purchased] AS [Available Total (users)],[PermTotal] AS [Permanent Purchased (users)],[Eval] AS [Term Purchased (users)],[Usage] AS [Used (users)],[EvalExpiryDate] AS [EvalExpiryDate],[Summary] AS [Summary]&parameter.GUID=-1&limit=5",
+			LicenseHyperscaleStorage:  licenseReportDataset + "2654b01f-9bb0-481e-b273-4b4fddc585b1/data?offset=0&fields=[LicUsageType] AS [License ID],[Dial] AS [License],[Purchased] AS [Available Total (TB)],[PermTotal] AS [Permanent Purchased (TB)],[Eval] AS [Term Purchased (TB)],[Usage] AS [Used (TB)],[EvalExpiryDate] AS [EvalExpiryDate],[Summary] AS [Summary]&parameter.GUID=-1&limit=10",
+			LicenseAirGapProtect:      licenseReportDataset + "cc2e77ec-9315-4446-cd7e-44ef80a8860e/data?offset=0&fields=[LicUsageType] AS [License ID],[Dial] AS [License],[Purchased] AS [Available Total (TB)],[PermTotal] AS [Permanent Purchased (TB)],[Eval] AS [Term Purchased (TB)],[Usage] AS [Used (TB)],[EvalExpiryDate] AS [EvalExpiryDate],[Summary] AS [Summary]&parameter.GUID=-1&limit=20",
+			LicenseDataInsights:       licenseReportDataset + "f7c6b473-f99d-44b4-ff5e-466b55656500/data?offset=0&fields=[LicUsageType] AS [License ID],[Dial] AS [License],[Purchased] AS [Available Total],[PermTotal] AS [Permanent Purchased],[Eval] AS [Term Purchased],[Usage] AS [Used],[EvalExpiryDate] AS [EvalExpiryDate],[Summary] AS [Summary]&parameter.GUID=-1&limit=20",
 		},
 	}
 }
