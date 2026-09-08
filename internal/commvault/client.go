@@ -373,6 +373,38 @@ func (c *Client) GetLicenseInfo(ctx context.Context) (LicenseInfoResponse, error
 	return resp, err
 }
 
+func (c *Client) GetCompanies(ctx context.Context) (CompaniesResponse, error) {
+	if err := c.EnsureLogin(ctx); err != nil {
+		return CompaniesResponse{}, err
+	}
+	var resp CompaniesResponse
+	err := c.do(ctx, http.MethodGet, "cc:V4/Company", nil, nil, nil, &resp, true)
+	return resp, err
+}
+
+func (c *Client) GetCompanyDetails(ctx context.Context, companyID int64) (CompanyDetailsResponse, error) {
+	if err := c.EnsureLogin(ctx); err != nil {
+		return CompanyDetailsResponse{}, err
+	}
+	var resp CompanyDetailsResponse
+	endpoint := fmt.Sprintf("cc:V4/Company/%d", companyID)
+	err := c.do(ctx, http.MethodGet, endpoint, nil, nil, nil, &resp, true)
+	return resp, err
+}
+
+func (c *Client) GetHypervisors(ctx context.Context) (HypervisorsResponse, error) {
+	if err := c.EnsureLogin(ctx); err != nil {
+		return HypervisorsResponse{}, err
+	}
+	query := url.Values{
+		"start": []string{"0"},
+		"limit": []string{"0"},
+	}
+	var resp HypervisorsResponse
+	err := c.do(ctx, http.MethodGet, "cc:V4/Hypervisor", query, nil, nil, &resp, true)
+	return resp, err
+}
+
 func (c *Client) GetStoragePools(ctx context.Context) (StoragePoolsResponse, error) {
 	if err := c.EnsureLogin(ctx); err != nil {
 		return StoragePoolsResponse{}, err

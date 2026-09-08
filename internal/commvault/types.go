@@ -1,5 +1,7 @@
 package commvault
 
+import "strings"
+
 type LoginResponse struct {
 	Token     string `json:"token"`
 	AuthToken string `json:"authToken"`
@@ -237,6 +239,89 @@ func (e Event) EffectiveClientName() string {
 type IDName struct {
 	ID   int64  `json:"id"`
 	Name string `json:"name"`
+}
+
+type HypervisorsResponse struct {
+	HypervisorCount int          `json:"HypervisorCount"`
+	Hypervisors     []Hypervisor `json:"Hypervisors"`
+}
+
+type Hypervisor struct {
+	ID             int64  `json:"id"`
+	Name           string `json:"name"`
+	DisplayName    string `json:"displayName"`
+	HostName       string `json:"hostName"`
+	RegionName     string `json:"regionName"`
+	CloudVendor    int    `json:"cloudVendor"`
+	HypervisorType int64  `json:"HypervisorType"`
+	Status         int64  `json:"status"`
+	Version        string `json:"version"`
+	Instance       IDName `json:"instance"`
+	Company        IDName `json:"company"`
+	Commcell       struct {
+		Name string `json:"name"`
+	} `json:"commcell"`
+	ClientActivityControl       []HypervisorActivityControl `json:"clientActivityControl"`
+	IsManagedIdentity           bool                        `json:"isManagedIdentity"`
+	UseHostedInfrastructure     bool                        `json:"useHostedInfrastructure"`
+	EnableCloudConfigProtection bool                        `json:"enableCloudConfigProtection"`
+	Description                 string                      `json:"description"`
+}
+
+type HypervisorActivityControl struct {
+	ActivityType       string `json:"activityType"`
+	EnableAfterADelay  bool   `json:"enableAfterADelay"`
+	EnableActivityType bool   `json:"enableActivityType"`
+}
+
+func (h Hypervisor) BackupEnabled() (enabled bool, known bool) {
+	for _, activity := range h.ClientActivityControl {
+		if strings.EqualFold(activity.ActivityType, "BACKUP") {
+			return activity.EnableActivityType, true
+		}
+	}
+	return false, false
+}
+
+type CompaniesResponse struct {
+	Companies    []Company `json:"companies"`
+	CompanyCount int       `json:"companyCount"`
+}
+
+type Company struct {
+	ID                      int64  `json:"id"`
+	Name                    string `json:"name"`
+	GUID                    string `json:"GUID"`
+	Alias                   string `json:"alias"`
+	IsReseller              bool   `json:"isReseller"`
+	AssociatedEntitiesCount int64  `json:"associatedEntitiesCount"`
+	Status                  string `json:"status"`
+	Commcell                struct {
+		Name        string `json:"name"`
+		DisplayName string `json:"displayName"`
+	} `json:"commcell"`
+}
+
+
+type CompanyDetailsResponse struct {
+	ID           int64 `json:"id"`
+	CreationTime int64 `json:"creationTime"`
+	General      struct {
+		NewAlias             string `json:"newAlias"`
+		EmailSuffix          string `json:"emailSuffix"`
+		ResellerMode         bool   `json:"resellerMode"`
+		EnableDataEncryption bool   `json:"enableDataEncryption"`
+		AutoDiscoverApp      bool   `json:"autoDiscoverApp"`
+		InfrastructureType   string `json:"infrastructureType"`
+		TwoFactorAuth        struct {
+			Enable bool `json:"enable"`
+		} `json:"twoFactorAuth"`
+		ServiceCommcells []IDName `json:"serviceCommcells"`
+	} `json:"general"`
+	// Security and Plans are only used for their length (association/plan
+	// counts), so the element fields are intentionally left unmapped.
+	Security []struct{} `json:"security"`
+	Plans    []IDName   `json:"plans"`
 }
 
 type StoragePoolsResponse struct {

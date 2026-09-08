@@ -21,7 +21,7 @@ import (
 
 const namespace = "commvault"
 
-var moduleNames = []string{"vm", "dashboard", "jobs", "alerts", "events", "storage", "licensing"}
+var moduleNames = []string{"vm", "dashboard", "jobs", "alerts", "events", "storage", "licensing", "hypervisors", "companies", "companies_details"}
 
 var coreModuleNames = map[string]bool{
 	"vm": true, "dashboard": true, "jobs": true, "alerts": true, "events": true,
@@ -119,6 +119,22 @@ type Exporter struct {
 
 	commcellLicenseExpiry *prometheus.GaugeVec
 	licenseExpiry         *prometheus.GaugeVec
+
+	hypervisorInfo          *prometheus.GaugeVec
+	hypervisorBackupEnabled *prometheus.GaugeVec
+	hypervisorCount         *prometheus.GaugeVec
+
+	companyInfo                     *prometheus.GaugeVec
+	companyAssociatedEntities       *prometheus.GaugeVec
+	companyCount                    *prometheus.GaugeVec
+	companyDetailsInfo              *prometheus.GaugeVec
+	companyTwoFactorAuthEnabled     *prometheus.GaugeVec
+	companyDataEncryptionEnabled    *prometheus.GaugeVec
+	companyAutoDiscoverAppEnabled   *prometheus.GaugeVec
+	companyCreationTime             *prometheus.GaugeVec
+	companyPlanCount                *prometheus.GaugeVec
+	companySecurityAssociationCount *prometheus.GaugeVec
+	companyServiceCommcellCount     *prometheus.GaugeVec
 }
 
 type moduleState struct {
@@ -310,6 +326,9 @@ func (e *Exporter) RefreshOnce(ctx context.Context) error {
 		{name: "events", fn: e.collectEvents},
 		{name: "storage", fn: e.collectStorage},
 		{name: "licensing", fn: e.collectLicensing},
+		{name: "hypervisors", fn: e.collectHypervisors},
+		{name: "companies", fn: e.collectCompanies},
+		{name: "companies_details", fn: e.collectCompanyDetails},
 	}
 	results := make(chan bool, len(specs))
 	var wg sync.WaitGroup
@@ -676,6 +695,59 @@ func statusName(code int) string {
 	}
 }
 
+func hypervisorTypeName(code int64) string {
+    switch code {
+    case 0:
+        return "none"
+    case 1:
+        return "vmware"
+    case 2:
+        return "hyperv"
+    case 3:
+        return "xen_server"
+    case 4:
+        return "amazon_ec2"
+    case 5:
+        return "azure_classic"
+    case 6:
+        return "redhat_virtualization"
+    case 7:
+        return "azure_resource_manager"
+    case 9:
+        return "nutanix_ahv"
+    case 10:
+        return "oracle_vm"
+    case 11:
+        return "docker"
+    case 12:
+        return "openstack"
+    case 13:
+        return "oracle_cloud_infrastructure_classic"
+    case 14:
+        return "fusioncompute"
+    case 15:
+        return "vmware_cloud_director"
+    case 16:
+        return "google_cloud"
+    default:
+        return fmt.Sprintf("type_%d", code)
+    }
+}
+ 
+func hypervisorStatusName (code int64) string {
+    switch code {
+    case 0:
+        return "none"
+    case 1:
+        return "unknown"
+    case 2:
+        return "retire_in_progress"
+    case 3:
+        return "deconfigured"
+    default:
+        return fmt.Sprintf("type_%d", code)
+    }
+}
 func boolLabel(v bool) string {
 	if v {
 		return "true"

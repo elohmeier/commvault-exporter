@@ -48,7 +48,7 @@ Commvault Login API request.
 Set `COMMVAULT_AUTH_TOKEN` to use a pre-created token instead of logging in.
 
 Disable collectors by these names: `vm`, `dashboard`, `jobs`, `alerts`,
-`events`, `storage`, `licensing`.
+`events`, `storage`, `licensing`. `hypervisors`, `companies`, `companies_details`.
 
 ## Refreshes, caching, and readiness
 
@@ -63,7 +63,7 @@ seconds with exponential backoff and 20 percent jitter. The delay is capped at
 `refresh-interval` and resets after a completely successful cycle.
 
 `/readyz` requires fresh snapshots for the enabled core modules: `vm`,
-`dashboard`, `jobs`, `alerts`, and `events`. `storage` and `licensing` failures
+`dashboard`, `jobs`, `alerts`, and `events`. `storage`, `licensing` `hypervisors`, `companies` and `companies_details` failures
 do not block readiness, but remain visible through `commvault_up`,
 `commvault_collector_up`, and the collector freshness metrics. If every core
 module is disabled, all remaining enabled modules become readiness-critical.
