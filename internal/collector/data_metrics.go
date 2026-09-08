@@ -57,6 +57,22 @@ type dataMetrics struct {
 
 	commcellLicenseExpiry *prometheus.GaugeVec
 	licenseExpiry         *prometheus.GaugeVec
+
+	hypervisorInfo          *prometheus.GaugeVec
+	hypervisorBackupEnabled *prometheus.GaugeVec
+	hypervisorCount         *prometheus.GaugeVec
+
+	companyInfo                     *prometheus.GaugeVec
+	companyAssociatedEntities       *prometheus.GaugeVec
+	companyCount                    *prometheus.GaugeVec
+	companyDetailsInfo              *prometheus.GaugeVec
+	companyTwoFactorAuthEnabled     *prometheus.GaugeVec
+	companyDataEncryptionEnabled    *prometheus.GaugeVec
+	companyAutoDiscoverAppEnabled   *prometheus.GaugeVec
+	companyCreationTime             *prometheus.GaugeVec
+	companyPlanCount                *prometheus.GaugeVec
+	companySecurityAssociationCount *prometheus.GaugeVec
+	companyServiceCommcellCount     *prometheus.GaugeVec
 }
 
 func newDataMetrics(cfg config.Config) *dataMetrics {
@@ -114,6 +130,22 @@ func newDataMetrics(cfg config.Config) *dataMetrics {
 		mountPathLogCaching:   g("mount_path_used_for_log_caching", "Whether the Commvault mount path is used for log caching.", []string{"library_id", "library", "mount_path_id", "mount_path"}),
 		commcellLicenseExpiry: g("commcell_license_expiry_timestamp_seconds", "Unix timestamp when the current CommCell license expires; 0 means no expiry was supplied.", []string{"commcell_id", "edition", "license_mode"}),
 		licenseExpiry:         g("license_expiry_timestamp_seconds", "Unix timestamp of the license expiry reported by Commvault; 0 means no expiry was supplied.", []string{"license_id", "license", "report", "unit"}),
+
+        hypervisorInfo:          g("hypervisor_info", "Commvault hypervisor (virtualization client) metadata.", []string{"hypervisor_id", "hypervisor", "display_name", "host_name", "type", "type_name", "status", "status_name", "version", "region", "commcell", "company"}),
+		hypervisorBackupEnabled: g("hypervisor_backup_enabled", "Whether backup activity is enabled for the Commvault hypervisor.", []string{"hypervisor_id", "hypervisor"}),
+		hypervisorCount:         g("hypervisor_count", "Total number of hypervisors reported by the Commvault list-hypervisors API.", nil),
+
+		companyInfo:                     g("company_info", "Commvault company (tenant) metadata.", []string{"company_id", "company", "alias", "guid", "status", "is_reseller", "commcell", "commcell_display_name"}),
+		companyAssociatedEntities:       g("company_associated_entities", "Number of entities associated with the Commvault company.", []string{"company_id", "company"}),
+		companyCount:                    g("company_count", "Total number of companies reported by the Commvault list-companies API.", nil),
+		companyDetailsInfo:              g("company_details_info", "Commvault company configuration metadata from the company details API.", []string{"company_id", "company", "infrastructure_type", "alias", "email_suffix"}),
+		companyTwoFactorAuthEnabled:     g("company_two_factor_auth_enabled", "Whether two-factor authentication is enabled for the Commvault company.", []string{"company_id", "company"}),
+		companyDataEncryptionEnabled:    g("company_data_encryption_enabled", "Whether data encryption is enabled for the Commvault company.", []string{"company_id", "company"}),
+		companyAutoDiscoverAppEnabled:   g("company_auto_discover_app_enabled", "Whether automatic application discovery is enabled for the Commvault company.", []string{"company_id", "company"}),
+		companyCreationTime:             g("company_creation_timestamp_seconds", "Unix timestamp when the Commvault company was created.", []string{"company_id", "company"}),
+		companyPlanCount:                g("company_plan_count", "Number of plans associated with the Commvault company.", []string{"company_id", "company"}),
+		companySecurityAssociationCount: g("company_security_association_count", "Number of security associations configured for the Commvault company.", []string{"company_id", "company"}),
+		companyServiceCommcellCount:     g("company_service_commcell_count", "Number of service CommCells associated with the Commvault company.", []string{"company_id", "company"}),
 	}
 }
 
@@ -133,6 +165,16 @@ func (m *dataMetrics) moduleCollectors(module string) []prometheus.Collector {
 		return []prometheus.Collector{m.storagePoolInfo, m.storagePoolCapacity, m.storagePoolFree, m.storagePolicyInfo, m.storagePolicyStream, m.mediaAgentInfo, m.librarySpace, m.libraryFreeRatio, m.libraryInfo, m.libraryReady, m.libraryMountPaths, m.mountPathInfo, m.mountPathReady, m.mountPathWriteOff, m.mountPathLogCaching}
 	case "licensing":
 		return []prometheus.Collector{m.capacityUsage, m.capacityExpiry, m.commcellLicenseExpiry, m.licenseInfo, m.licenseAmount, m.licenseExpiry}
+	case "hypervisors":
+		return []prometheus.Collector{m.hypervisorInfo, m.hypervisorBackupEnabled, m.hypervisorCount}
+	case "companies":
+		return []prometheus.Collector{m.companyInfo, m.companyAssociatedEntities, m.companyCount}
+	case "companies_details":
+		return []prometheus.Collector{
+			m.companyDetailsInfo, m.companyTwoFactorAuthEnabled, m.companyDataEncryptionEnabled,
+			m.companyAutoDiscoverAppEnabled, m.companyCreationTime, m.companyPlanCount,
+			m.companySecurityAssociationCount, m.companyServiceCommcellCount,
+		}
 	default:
 		return nil
 	}
@@ -197,4 +239,18 @@ func (e *Exporter) useDataMetrics(m *dataMetrics) {
 	e.mountPathLogCaching = m.mountPathLogCaching
 	e.commcellLicenseExpiry = m.commcellLicenseExpiry
 	e.licenseExpiry = m.licenseExpiry
+	e.hypervisorInfo = m.hypervisorInfo
+	e.hypervisorBackupEnabled = m.hypervisorBackupEnabled
+	e.hypervisorCount = m.hypervisorCount
+	e.companyInfo = m.companyInfo
+	e.companyAssociatedEntities = m.companyAssociatedEntities
+	e.companyCount = m.companyCount
+	e.companyDetailsInfo = m.companyDetailsInfo
+	e.companyTwoFactorAuthEnabled = m.companyTwoFactorAuthEnabled
+	e.companyDataEncryptionEnabled = m.companyDataEncryptionEnabled
+	e.companyAutoDiscoverAppEnabled = m.companyAutoDiscoverAppEnabled
+	e.companyCreationTime = m.companyCreationTime
+	e.companyPlanCount = m.companyPlanCount
+	e.companySecurityAssociationCount = m.companySecurityAssociationCount
+	e.companyServiceCommcellCount = m.companyServiceCommcellCount
 }

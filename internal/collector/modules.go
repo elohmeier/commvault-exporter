@@ -14,6 +14,7 @@ import (
 )
 
 const libraryDetailWorkers = 4
+const companyDetailWorkers = 4
 
 var storageAcceleratorEventPattern = regexp.MustCompile(`(?i)due to the mount path (.+?) is not accessible for ([0-9]+) attempts`)
 
@@ -520,6 +521,131 @@ func boolFloat(value bool) float64 {
 		return 1
 	}
 	return 0
+}
+
+func (e *Exporter) collectHypervisors(ctx context.Context) error {
+	resp, err := e.client.GetHypervisors(ctx)
+	if err != nil {
+		return err
+	}
+	e.cacheMu.Lock()
+	defer e.cacheMu.Unlock()
+	for _, hv := range resp.Hypervisors {
+		hvID := id(hv.ID)
+		e.hypervisorInfo.With(e.baseLabels(
+			"hypervisor_id", hvID,
+			"hypervisor", hv.Name,
+			"display_name", hv.DisplayName,
+			"host_name", hv.HostName,
+			"type", id(hv.HypervisorType),
+			"type_name", hypervisorTypeName(hv.HypervisorType),
+            "status", id(hv.Status),
+            "status_name", hypervisorStatusName(hv.Status),
+			"version", hv.Version,
+			"region", hv.RegionName,
+			"commcell", hv.Commcell.Name,
+			"company", hv.Company.Name,
+		)).Set(1)
+		if enabled, known := hv.BackupEnabled(); known {
+			e.hypervisorBackupEnabled.With(e.baseLabels("hypervisor_id", hvID, "hypervisor", hv.Name)).Set(boolFloat(enabled))
+		}
+	}
+	e.hypervisorCount.With(e.baseLabels()).Set(float64(resp.HypervisorCount))
+	return nil
+}
+
+func (e *Exporter) collectCompanies(ctx context.Context) error {
+	resp, err := e.client.GetCompanies(ctx)
+	if err != nil {
+		return err
+	}
+
+	e.cacheMu.Lock()
+	defer e.cacheMu.Unlock()
+	for _, company := range resp.Companies {
+		companyID := id(company.ID)
+		e.companyInfo.With(e.baseLabels(
+			"company_id", companyID,
+			"company", company.Name,
+			"alias", company.Alias,
+			"guid", company.GUID,
+			"status", company.Status,
+			"is_reseller", boolLabel(company.IsReseller),
+			"commcell", company.Commcell.Name,
+			"commcell_display_name", company.Commcell.DisplayName,
+		)).Set(1)
+		e.companyAssociatedEntities.With(e.baseLabels("company_id", companyID, "company", company.Name)).Set(float64(company.AssociatedEntitiesCount))
+	}
+	e.companyCount.With(e.baseLabels()).Set(float64(resp.CompanyCount))
+	return nil
+}
+
+
+func (e *Exporter) collectCompanyDetails(ctx context.Context) error {
+	resp, err := e.client.GetCompanies(ctx)
+	if err != nil {
+		return err
+	}
+	if len(resp.Companies) == 0 {
+		return nil
+	}
+
+	type companyDetailResult struct {
+		company commvault.Company
+		details commvault.CompanyDetailsResponse
+		err     error
+	}
+	results := make([]companyDetailResult, len(resp.Companies))
+	jobs := make(chan int, len(resp.Companies))
+	for index := range resp.Companies {
+		results[index].company = resp.Companies[index]
+		jobs <- index
+	}
+	close(jobs)
+
+	workerCount := min(companyDetailWorkers, len(results))
+	var workers sync.WaitGroup
+	workers.Add(workerCount)
+	for range workerCount {
+		go func() {
+			defer workers.Done()
+			for index := range jobs {
+				company := results[index].company
+				results[index].details, results[index].err = e.client.GetCompanyDetails(ctx, company.ID)
+			}
+		}()
+	}
+	workers.Wait()
+
+	var errs []error
+	e.cacheMu.Lock()
+	defer e.cacheMu.Unlock()
+	for _, result := range results {
+		if result.err != nil {
+			errs = append(errs, fmt.Errorf("company %d (%s): %w", result.company.ID, result.company.Name, result.err))
+			continue
+		}
+		e.collectCompanyDetailsMetrics(result.company, result.details)
+	}
+	return errors.Join(errs...)
+}
+
+func (e *Exporter) collectCompanyDetailsMetrics(company commvault.Company, details commvault.CompanyDetailsResponse) {
+	companyID := id(company.ID)
+	e.companyDetailsInfo.With(e.baseLabels(
+		"company_id", companyID,
+		"company", company.Name,
+		"infrastructure_type", details.General.InfrastructureType,
+		"alias", details.General.NewAlias,
+		"email_suffix", details.General.EmailSuffix,
+	)).Set(1)
+	e.companyTwoFactorAuthEnabled.With(e.baseLabels("company_id", companyID, "company", company.Name)).Set(boolFloat(details.General.TwoFactorAuth.Enable))
+	e.companyDataEncryptionEnabled.With(e.baseLabels("company_id", companyID, "company", company.Name)).Set(boolFloat(details.General.EnableDataEncryption))
+	e.companyAutoDiscoverAppEnabled.With(e.baseLabels("company_id", companyID, "company", company.Name)).Set(boolFloat(details.General.AutoDiscoverApp))
+	e.companyCreationTime.With(e.baseLabels("company_id", companyID, "company", company.Name)).Set(float64(details.CreationTime))
+	e.companyPlanCount.With(e.baseLabels("company_id", companyID, "company", company.Name)).Set(float64(len(details.Plans)))
+	e.companySecurityAssociationCount.With(e.baseLabels("company_id", companyID, "company", company.Name)).Set(float64(len(details.Security)))
+	e.companyServiceCommcellCount.With(e.baseLabels("company_id", companyID, "company", company.Name)).Set(float64(len(details.General.ServiceCommcells)))
 }
 
 func (e *Exporter) collectLicensing(ctx context.Context) error {
