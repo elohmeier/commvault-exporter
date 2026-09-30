@@ -62,7 +62,7 @@ commvault_vm_status{guid="guid-a",status="1",status_name="protected",vm="vm-a"} 
 	}
 }
 
-func TestCoreSnapshotControlsReadiness(t *testing.T) {
+func TestCoreSnapshotControlsCacheFreshness(t *testing.T) {
 	exporter := newReliabilityExporter(t, []string{"dashboard", "jobs", "alerts", "events", "storage"})
 	now := time.Unix(1_800_000_000, 0)
 	exporter.now = func() time.Time { return now }
@@ -76,7 +76,7 @@ func TestCoreSnapshotControlsReadiness(t *testing.T) {
 		t.Fatal("licensing module reported success")
 	}
 	status := exporter.cacheStatus(now)
-	if !status.Ready || status.Stale {
+	if !status.Ready || !status.CacheReady || status.Stale {
 		t.Fatalf("status = %+v, want ready with failed optional module", status)
 	}
 	for _, module := range status.Modules {
@@ -93,7 +93,7 @@ func TestRemainingOptionalModuleBecomesRequired(t *testing.T) {
 	exporter := newReliabilityExporter(t, []string{"vm", "dashboard", "jobs", "alerts", "events", "storage"})
 	now := time.Unix(1_800_000_000, 0)
 	exporter.now = func() time.Time { return now }
-	if exporter.cacheStatus(now).Ready {
+	if exporter.cacheStatus(now).CacheReady {
 		t.Fatal("exporter is ready before the remaining module succeeds")
 	}
 	data := newDataMetrics(exporter.cfg)
@@ -101,7 +101,7 @@ func TestRemainingOptionalModuleBecomesRequired(t *testing.T) {
 	if !exporter.runModule(context.Background(), "licensing", func(context.Context) error { return nil }, data.moduleCollectors("licensing")) {
 		t.Fatal("licensing module failed")
 	}
-	if status := exporter.cacheStatus(now); !status.Ready {
+	if status := exporter.cacheStatus(now); !status.CacheReady {
 		t.Fatalf("status = %+v, want remaining module to control readiness", status)
 	}
 }
@@ -124,7 +124,7 @@ func TestRetryDelayBackoffAndCap(t *testing.T) {
 	wants := []time.Duration{15 * time.Second, 30 * time.Second, time.Minute, time.Minute}
 	for i, want := range wants {
 		exporter.consecutiveErrs = i + 1
-		if got := exporter.retryDelay(); got != want {
+		if got := exporter.retryDelay(exporter.consecutiveErrs); got != want {
 			t.Fatalf("retry %d delay = %s, want %s", i+1, got, want)
 		}
 	}
@@ -159,7 +159,7 @@ func TestSchedulerRetriesFailedInitialRefresh(t *testing.T) {
 
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
-		if exporter.cacheStatus(time.Now()).Ready {
+		if exporter.cacheStatus(time.Now()).CacheReady {
 			if requests.Load() < 2 {
 				t.Fatalf("requests = %d, want at least two", requests.Load())
 			}

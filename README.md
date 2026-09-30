@@ -35,8 +35,8 @@ The exporter listens on `:9720` by default.
 | `-page-size` | `COMMVAULT_PAGE_SIZE` | `1000` | API page size. |
 | `-timeout` | `COMMVAULT_TIMEOUT` | `30s` | Per-request timeout. |
 | `-refresh-interval` | `COMMVAULT_REFRESH_INTERVAL` | `5m` | Background refresh interval. |
-| `-refresh-timeout` | `COMMVAULT_REFRESH_TIMEOUT` | `2m` | Timeout for one full refresh. |
-| `-max-stale` | `COMMVAULT_MAX_STALE` | `15m` | Maximum cache age before readiness fails. |
+| `-refresh-timeout` | `COMMVAULT_REFRESH_TIMEOUT` | `2m` | Deadline per collector refresh, including request retries. |
+| `-max-stale` | `COMMVAULT_MAX_STALE` | `15m` | Maximum age of domain data served from a successful snapshot. |
 | `-job-completed-lookup-time` | `COMMVAULT_JOB_COMPLETED_LOOKUP_TIME` | `86400` | Commvault job lookup window in seconds. |
 | `-event-lookback` | `COMMVAULT_EVENT_LOOKBACK` | `24h` | Rolling window requested from the CommCell Events API. |
 | `-ignore-cert` | `COMMVAULT_IGNORE_CERT` | `false` | Disable TLS certificate verification. |
@@ -52,21 +52,40 @@ Disable collectors by these names: `vm`, `dashboard`, `jobs`, `alerts`,
 
 ## Refreshes, caching, and readiness
 
-Enabled modules refresh concurrently while a global limit allows at most four
-Commvault API requests at once. A refresh writes each module into a staging
-snapshot. A successful module atomically replaces its previously published
-snapshot; a failed module keeps serving its last successful snapshot until it
-is older than `max-stale`.
+`/readyz` reports whether the initialized exporter can serve requests. It returns
+200 even before the first successful Commvault refresh, during API timeouts or
+permission errors, and after cached data expires. It returns 503 after `Stop`
+or cancellation of the scheduler context. `/health` is the HTTP liveness check.
+Neither endpoint requires a successful remote API call.
 
-After a refresh cycle with any collector error, the exporter retries after 15
-seconds with exponential backoff and 20 percent jitter. The delay is capped at
-`refresh-interval` and resets after a completely successful cycle.
+Each enabled module has an independent refresh schedule and deadline. All modules
+share a global limit of four concurrent API requests. Successful modules wait
+`refresh-interval`; transient failures retry after 15 seconds with exponential
+backoff and 20 percent jitter, capped at `refresh-interval`. Permanent failures
+(such as HTTP 403 or invalid response formats) use the normal interval. A failing
+module does not rerun successful modules or delay their next scheduled refresh.
+A server's `Retry-After` can extend the delay beyond the normal interval.
 
-`/readyz` requires fresh snapshots for the enabled core modules: `vm`,
-`dashboard`, `jobs`, `alerts`, and `events`. `storage` and `licensing` failures
-do not block readiness, but remain visible through `commvault_up`,
-`commvault_collector_up`, and the collector freshness metrics. If every core
-module is disabled, all remaining enabled modules become readiness-critical.
+Idempotent GET requests retry once on transient transport errors, HTTP 429, or
+HTTP 500/502/503/504, with a jittered delay of approximately 500ms. Retry-After
+is respected and waiting is cancellable within the collector deadline. A failed
+page is retried without rereading earlier pages. Login POSTs, permission errors,
+and invalid JSON/schema responses are not transient request retries. The existing
+single reauthentication attempt on HTTP 401 is preserved.
+
+VM/job inventories and library inventory/details publish complete snapshots
+atomically. Dashboard, storage, and licensing subcollectors publish independent
+snapshots, so a failed library request does not hide fresh storage pool data.
+A failed dataset retains its last successful snapshot until `max-stale`, then its
+domain metrics disappear. Expired data is never substituted with zero values.
+
+Use `up` for scrape reachability and `commvault_collector_cache_stale == 1` for
+missing or stale collection data, including optional storage and licensing modules.
+A five-minute hold on this freshness alert allows roughly twenty minutes without
+a complete success with the default fifteen-minute cache TTL. An initial missing
+snapshot alerts after five minutes. Choose durations appropriate to the monitoring
+requirement. Cover missing scrape targets with an `absent(up{job="..."})` alert as
+well. Readiness is not a substitute for these alerts.
 
 Refresh and cache behavior is exposed through:
 
@@ -77,10 +96,24 @@ Refresh and cache behavior is exposed through:
 - `commvault_collector_last_success_timestamp_seconds`
 - `commvault_collector_cache_age_seconds`
 - `commvault_collector_cache_stale`
+- `commvault_subcollector_up`
+- `commvault_subcollector_cache_stale`
+- `commvault_subcollector_last_success_timestamp_seconds`
 
-`commvault_up` remains all-or-nothing and is `1` only when every enabled module
-succeeded in the latest refresh cycle. `/debug/cache` shows the same state with
-per-module readiness and publication details.
+`commvault_up` is 1 only after every enabled module's latest attempt succeeded.
+With independent schedules, scheduler refresh counters count individual module
+attempts. `RefreshOnce` explicitly attempts all enabled modules as one cycle.
+The global consecutive-error gauge describes consecutive completed cycles;
+`/debug/cache` additionally reports consecutive errors and next attempt per module.
+`refresh_in_progress` stays 1 while any cycle is running. The next-attempt gauge
+is 0 while refreshing or stopped, otherwise it is the earliest scheduled attempt.
+
+`/readyz` and `/debug/cache` return separate `ready` and `cache_ready` JSON fields.
+`cache_ready` and the aggregate cache metrics retain the enabled core-module
+freshness policy (`vm`, `dashboard`, `jobs`, `alerts`, `events`; all enabled
+modules if none of those are enabled). Module freshness remains conservative:
+it measures the last complete module success, while subcollector freshness
+shows the independent snapshots actually being served.
 
 Report-backed dashboard/storage/licensing endpoints are configurable because
 Commvault publishes some of them as report dataset paths. Override them with:

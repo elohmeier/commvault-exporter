@@ -198,3 +198,37 @@ func (e *Exporter) useDataMetrics(m *dataMetrics) {
 	e.commcellLicenseExpiry = m.commcellLicenseExpiry
 	e.licenseExpiry = m.licenseExpiry
 }
+
+func (m *dataMetrics) subcollectorCollectors(module, sub string) []prometheus.Collector {
+	switch module + "/" + sub {
+	case "dashboard/commcell_details":
+		return []prometheus.Collector{m.commcellInfo}
+	case "dashboard/sla":
+		return []prometheus.Collector{m.slaStatusCount}
+	case "dashboard/jobs_24h":
+		return []prometheus.Collector{m.jobs24hCount}
+	case "dashboard/health_overview":
+		return []prometheus.Collector{m.healthStatusCount}
+	case "dashboard/environment":
+		return []prometheus.Collector{m.entityCount}
+	case "storage/pools":
+		return []prometheus.Collector{m.storagePoolInfo, m.storagePoolCapacity, m.storagePoolFree}
+	case "storage/policies":
+		return []prometheus.Collector{m.storagePolicyInfo, m.storagePolicyStream}
+	case "storage/media_agents":
+		return []prometheus.Collector{m.mediaAgentInfo}
+	case "storage/storage_space_usage":
+		return []prometheus.Collector{m.librarySpace, m.libraryFreeRatio}
+	case "storage/libraries":
+		return []prometheus.Collector{m.libraryInfo, m.libraryReady, m.libraryMountPaths, m.mountPathInfo, m.mountPathReady, m.mountPathWriteOff, m.mountPathLogCaching}
+	case "licensing/commcell_license":
+		return []prometheus.Collector{m.commcellLicenseExpiry}
+	case "licensing/current_capacity":
+		return []prometheus.Collector{m.capacityUsage, m.capacityExpiry}
+	default:
+		if module == "licensing" {
+			return []prometheus.Collector{m.licenseInfo, m.licenseAmount, m.licenseExpiry}
+		}
+		return nil
+	}
+}

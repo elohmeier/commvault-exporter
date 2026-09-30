@@ -321,35 +321,20 @@ func parseStorageAcceleratorDescription(description string) (string, int64, bool
 }
 
 func (e *Exporter) collectStorage(ctx context.Context) error {
-	var pools commvault.StoragePoolsResponse
-	var policies commvault.StoragePoliciesResponse
-	var mediaAgents commvault.MediaAgentsResponse
-	var spaceUsage commvault.TabularResponse
-	errs := []error{
-		e.runSubcollector(ctx, "storage", "pools", func(ctx context.Context) error {
-			var err error
-			pools, err = e.client.GetStoragePools(ctx)
-			return err
-		}),
-		e.runSubcollector(ctx, "storage", "policies", func(ctx context.Context) error {
-			var err error
-			policies, err = e.client.GetStoragePolicies(ctx)
-			return err
-		}),
-		e.runSubcollector(ctx, "storage", "media_agents", func(ctx context.Context) error {
-			var err error
-			mediaAgents, err = e.client.GetMediaAgents(ctx)
-			return err
-		}),
-		e.runSubcollector(ctx, "storage", "storage_space_usage", func(ctx context.Context) error {
-			var err error
-			spaceUsage, err = e.client.GetTabular(ctx, e.cfg.Paths.StorageSpaceUsage)
-			return err
-		}),
+	return errors.Join(
+		e.runSubcollector(ctx, "storage", "pools", e.collectStoragePools),
+		e.runSubcollector(ctx, "storage", "policies", e.collectStoragePolicies),
+		e.runSubcollector(ctx, "storage", "media_agents", e.collectMediaAgents),
+		e.runSubcollector(ctx, "storage", "storage_space_usage", e.collectStorageSpace),
 		e.runSubcollector(ctx, "storage", "libraries", e.collectLibraries),
+	)
+}
+
+func (e *Exporter) collectStoragePools(ctx context.Context) error {
+	pools, err := e.client.GetStoragePools(ctx)
+	if err != nil {
+		return err
 	}
-	e.cacheMu.Lock()
-	defer e.cacheMu.Unlock()
 	for _, pool := range pools.StoragePoolList {
 		poolID := id(pool.StoragePoolEntity.ID)
 		poolName := pool.StoragePoolEntity.Name
@@ -357,14 +342,41 @@ func (e *Exporter) collectStorage(ctx context.Context) error {
 		e.storagePoolCapacity.With(e.baseLabels("pool_id", poolID, "pool", poolName)).Set(float64(pool.TotalCapacity))
 		e.storagePoolFree.With(e.baseLabels("pool_id", poolID, "pool", poolName)).Set(float64(pool.TotalFreeSpace))
 	}
+
+	return nil
+}
+
+func (e *Exporter) collectStoragePolicies(ctx context.Context) error {
+	policies, err := e.client.GetStoragePolicies(ctx)
+	if err != nil {
+		return err
+	}
 	for _, policy := range policies.Policies {
 		policyID := id(policy.StoragePolicyRef.ID)
 		policyName := policy.StoragePolicyRef.Name
 		e.storagePolicyInfo.With(e.baseLabels("policy_id", policyID, "policy", policyName, "type", id(policy.Type), "copies", id(policy.NumberOfCopies), "plans", joinPlans(policy.Plans))).Set(1)
 		e.storagePolicyStream.With(e.baseLabels("policy_id", policyID, "policy", policyName)).Set(float64(policy.NumberOfStreams))
 	}
+
+	return nil
+}
+
+func (e *Exporter) collectMediaAgents(ctx context.Context) error {
+	mediaAgents, err := e.client.GetMediaAgents(ctx)
+	if err != nil {
+		return err
+	}
 	for _, agent := range mediaAgents.Response {
 		e.mediaAgentInfo.With(e.baseLabels("media_agent_id", id(agent.EntityInfo.ID), "media_agent", agent.EntityInfo.Name)).Set(1)
+	}
+
+	return nil
+}
+
+func (e *Exporter) collectStorageSpace(ctx context.Context) error {
+	spaceUsage, err := e.client.GetTabular(ctx, e.cfg.Paths.StorageSpaceUsage)
+	if err != nil {
+		return err
 	}
 	for _, row := range tableRows(spaceUsage) {
 		libraryID := s(row["LibraryId"])
@@ -375,7 +387,8 @@ func (e *Exporter) collectStorage(ctx context.Context) error {
 		e.librarySpace.With(e.baseLabels("library_id", libraryID, "library", library, "health_status", health, "kind", "used")).Set(f(row["TotalUsedSpaceMB"]) * 1024 * 1024)
 		e.libraryFreeRatio.With(e.baseLabels("library_id", libraryID, "library", library, "health_status", health)).Set(f(row["FreeSpacePercentage"]) / 100)
 	}
-	return errors.Join(errs...)
+
+	return nil
 }
 
 type libraryDetailResult struct {

@@ -10,14 +10,17 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -56,11 +59,13 @@ type Client struct {
 	mu         sync.Mutex
 	loginMu    sync.Mutex
 	requestSem chan struct{}
+	retryWait  func(context.Context, time.Duration) error
 }
 
 type APIError struct {
 	StatusCode int
 	Body       string
+	RetryAfter time.Duration
 }
 
 func (e APIError) Error() string {
@@ -151,6 +156,7 @@ func NewClient(cfg Config) (*Client, error) {
 		httpClient: &http.Client{Timeout: cfg.Timeout, Transport: transport},
 		metrics:    cfg.Metrics,
 		requestSem: make(chan struct{}, maxConcurrentRequests),
+		retryWait:  waitRetry,
 	}, nil
 }
 
@@ -439,6 +445,31 @@ func (c *Client) GetLibraryDetails(ctx context.Context, libraryID int64) (Librar
 }
 
 func (c *Client) do(ctx context.Context, method, endpoint string, query url.Values, headers http.Header, body any, dest any, auth bool) error {
+	for attempt := 0; ; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		err := c.doAuthenticated(ctx, method, endpoint, query, headers, body, dest, auth)
+		// Only idempotent reads get a transient retry; login POSTs are never replayed.
+		if err == nil || method != http.MethodGet || attempt >= 1 || !IsTransient(err) || ctx.Err() != nil {
+			return err
+		}
+		delay := time.Duration(float64(500*time.Millisecond) * (0.8 + rand.Float64()*0.4))
+		delay = max(delay, RetryAfter(err))
+		// A large Retry-After is handled by the scheduler, without tying up a worker.
+		if RetryAfter(err) > c.httpClient.Timeout {
+			return err
+		}
+		if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) <= delay {
+			return err
+		}
+		if waitErr := c.retryWait(ctx, delay); waitErr != nil {
+			return waitErr
+		}
+	}
+}
+
+func (c *Client) doAuthenticated(ctx context.Context, method, endpoint string, query url.Values, headers http.Header, body any, dest any, auth bool) error {
 	var encoded []byte
 	if body != nil {
 		var err error
@@ -514,18 +545,28 @@ func (c *Client) doOnce(ctx context.Context, method, endpoint string, query url.
 
 	if auth && resp.StatusCode == http.StatusUnauthorized {
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return true, usedToken, APIError{StatusCode: resp.StatusCode, Body: string(data)}
+		return true, usedToken, APIError{StatusCode: resp.StatusCode, Body: string(data), RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After"), time.Now())}
 	}
 	if resp.StatusCode >= 400 {
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return false, usedToken, APIError{StatusCode: resp.StatusCode, Body: string(data)}
+		return false, usedToken, APIError{StatusCode: resp.StatusCode, Body: string(data), RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After"), time.Now())}
 	}
 	if dest == nil {
 		return false, usedToken, nil
 	}
 	decoder := json.NewDecoder(resp.Body)
 	decoder.UseNumber()
-	return false, usedToken, decoder.Decode(dest)
+	// Do not contaminate a retry with a partially decoded page.
+	value := reflect.ValueOf(dest)
+	if value.Kind() != reflect.Pointer || value.IsNil() {
+		return false, usedToken, errors.New("response destination must be a non-nil pointer")
+	}
+	decoded := reflect.New(value.Elem().Type())
+	if err := decoder.Decode(decoded.Interface()); err != nil {
+		return false, usedToken, responseDecodeError{err}
+	}
+	value.Elem().Set(decoded.Elem())
+	return false, usedToken, nil
 }
 
 func (c *Client) apiURL(endpoint string, query url.Values) url.URL {
@@ -594,3 +635,95 @@ func hasKnownAPIBase(path string) bool {
 	}
 	return false
 }
+
+// IsTransient classifies individual errors and joined collector failures. A
+// permanent error in a group prevents fast whole-module retries.
+func IsTransient(err error) bool {
+	if err == nil {
+		return false
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		for _, child := range joined.Unwrap() {
+			if !IsTransient(child) {
+				return false
+			}
+		}
+		return len(joined.Unwrap()) > 0
+	}
+	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
+		if _, isDecode := err.(responseDecodeError); !isDecode {
+			return IsTransient(wrapped.Unwrap())
+		}
+	}
+	var api APIError
+	if errors.As(err, &api) {
+		switch api.StatusCode {
+		case 429, 500, 502, 503, 504:
+			return true
+		}
+		return false
+	}
+	if errors.Is(err, context.Canceled) {
+		return false
+	}
+	var network net.Error
+	if errors.As(err, &network) {
+		if network.Timeout() || network.Temporary() {
+			return true
+		}
+	}
+	var decode responseDecodeError
+	if errors.As(err, &decode) {
+		return false
+	}
+	if errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.EPIPE) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	return false
+}
+
+// RetryAfter returns the longest server-requested delay in a collector failure.
+func RetryAfter(err error) time.Duration {
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		var delay time.Duration
+		for _, child := range joined.Unwrap() {
+			delay = max(delay, RetryAfter(child))
+		}
+		return delay
+	}
+	var api APIError
+	if errors.As(err, &api) {
+		return api.RetryAfter
+	}
+	return 0
+}
+
+func parseRetryAfter(value string, now time.Time) time.Duration {
+	if seconds, err := strconv.ParseInt(value, 10, 64); err == nil {
+		// Reject negative/overflowing durations.
+		if seconds > 0 && seconds <= int64((1<<63-1)/time.Second) {
+			return time.Duration(seconds) * time.Second
+		}
+		return 0
+	}
+	if date, err := http.ParseTime(value); err == nil {
+		return max(date.Sub(now), 0)
+	}
+	return 0
+}
+
+func waitRetry(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+type responseDecodeError struct{ err error }
+
+func (e responseDecodeError) Error() string { return "decode response: " + e.err.Error() }
+func (e responseDecodeError) Unwrap() error { return e.err }

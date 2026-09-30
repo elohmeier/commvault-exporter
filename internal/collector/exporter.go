@@ -36,9 +36,15 @@ type Exporter struct {
 	labelKeys []string
 
 	refreshMu           sync.Mutex
+	moduleLocks         map[string]*sync.Mutex
+	activeCycles        int
 	cacheMu             sync.Mutex
 	startOnce           sync.Once
 	schedulerCancel     context.CancelFunc
+	schedulerContext    context.Context
+	stopped             bool
+	owner               *Exporter
+	subSnapshots        map[string]moduleSnapshot
 	moduleStates        map[string]*moduleState
 	moduleSnapshots     map[string]moduleSnapshot
 	dataTemplate        *dataMetrics
@@ -50,23 +56,25 @@ type Exporter struct {
 	jitter              func(time.Duration) time.Duration
 	retryBase           time.Duration
 
-	up                   *prometheus.GaugeVec
-	refreshDuration      *prometheus.GaugeVec
-	refreshTotal         *prometheus.CounterVec
-	refreshErrorsTotal   *prometheus.CounterVec
-	collectorUp          *prometheus.GaugeVec
-	subcollectorUp       *prometheus.GaugeVec
-	cacheLastAttempt     *prometheus.GaugeVec
-	cacheLastSuccess     *prometheus.GaugeVec
-	cacheAge             *prometheus.GaugeVec
-	cacheStale           *prometheus.GaugeVec
-	refreshConsecutive   *prometheus.GaugeVec
-	refreshInProgress    *prometheus.GaugeVec
-	refreshNextAttempt   *prometheus.GaugeVec
-	collectorDuration    *prometheus.GaugeVec
-	collectorLastSuccess *prometheus.GaugeVec
-	collectorCacheAge    *prometheus.GaugeVec
-	collectorCacheStale  *prometheus.GaugeVec
+	up                      *prometheus.GaugeVec
+	refreshDuration         *prometheus.GaugeVec
+	refreshTotal            *prometheus.CounterVec
+	refreshErrorsTotal      *prometheus.CounterVec
+	collectorUp             *prometheus.GaugeVec
+	subcollectorUp          *prometheus.GaugeVec
+	subcollectorCacheStale  *prometheus.GaugeVec
+	subcollectorLastSuccess *prometheus.GaugeVec
+	cacheLastAttempt        *prometheus.GaugeVec
+	cacheLastSuccess        *prometheus.GaugeVec
+	cacheAge                *prometheus.GaugeVec
+	cacheStale              *prometheus.GaugeVec
+	refreshConsecutive      *prometheus.GaugeVec
+	refreshInProgress       *prometheus.GaugeVec
+	refreshNextAttempt      *prometheus.GaugeVec
+	collectorDuration       *prometheus.GaugeVec
+	collectorLastSuccess    *prometheus.GaugeVec
+	collectorCacheAge       *prometheus.GaugeVec
+	collectorCacheStale     *prometheus.GaugeVec
 
 	vmInfo              *prometheus.GaugeVec
 	vmStatus            *prometheus.GaugeVec
@@ -122,13 +130,15 @@ type Exporter struct {
 }
 
 type moduleState struct {
-	Module       string        `json:"module"`
-	LastAttempt  time.Time     `json:"-"`
-	LastSuccess  time.Time     `json:"-"`
-	LastDuration time.Duration `json:"-"`
-	Attempts     uint64        `json:"attempts"`
-	Errors       uint64        `json:"errors"`
-	LastError    string        `json:"last_error,omitempty"`
+	Module            string        `json:"module"`
+	LastAttempt       time.Time     `json:"-"`
+	LastSuccess       time.Time     `json:"-"`
+	LastDuration      time.Duration `json:"-"`
+	Attempts          uint64        `json:"attempts"`
+	Errors            uint64        `json:"errors"`
+	ConsecutiveErrors int           `json:"consecutive_errors"`
+	NextAttempt       time.Time     `json:"-"`
+	LastError         string        `json:"last_error,omitempty"`
 }
 
 type moduleSnapshot struct {
@@ -137,18 +147,29 @@ type moduleSnapshot struct {
 }
 
 type cacheStatus struct {
-	Ready             bool                `json:"ready"`
-	LastAttemptUnix   int64               `json:"last_attempt_unix,omitempty"`
-	LastSuccessUnix   int64               `json:"last_success_unix,omitempty"`
-	AgeSeconds        float64             `json:"age_seconds"`
-	MaxStaleSeconds   float64             `json:"max_stale_seconds"`
-	Stale             bool                `json:"stale"`
-	ConsecutiveErrors int                 `json:"consecutive_errors"`
-	NextAttemptUnix   int64               `json:"next_attempt_unix,omitempty"`
-	Modules           []cacheModuleStatus `json:"modules"`
+	Ready             bool                      `json:"ready"`
+	LastAttemptUnix   int64                     `json:"last_attempt_unix,omitempty"`
+	LastSuccessUnix   int64                     `json:"last_success_unix,omitempty"`
+	AgeSeconds        float64                   `json:"age_seconds"`
+	MaxStaleSeconds   float64                   `json:"max_stale_seconds"`
+	Stale             bool                      `json:"stale"`
+	ConsecutiveErrors int                       `json:"consecutive_errors"`
+	NextAttemptUnix   int64                     `json:"next_attempt_unix,omitempty"`
+	CacheReady        bool                      `json:"cache_ready"`
+	Subcollectors     []cacheSubcollectorStatus `json:"subcollectors"`
+	Modules           []cacheModuleStatus       `json:"modules"`
+}
+
+type cacheSubcollectorStatus struct {
+	Collector       string `json:"collector"`
+	Subcollector    string `json:"subcollector"`
+	LastSuccessUnix int64  `json:"last_success_unix"`
+	Stale           bool   `json:"stale"`
 }
 
 type cacheModuleStatus struct {
+	NextAttemptUnix     int64   `json:"next_attempt_unix,omitempty"`
+	ConsecutiveErrors   int     `json:"consecutive_errors"`
 	Module              string  `json:"module"`
 	LastAttemptUnix     int64   `json:"last_attempt_unix,omitempty"`
 	LastSuccessUnix     int64   `json:"last_success_unix,omitempty"`
@@ -197,30 +218,34 @@ func New(cfg config.Config, client *commvault.Client, logger *slog.Logger) *Expo
 		logger:          logger,
 		labelKeys:       cfg.LabelKeys(),
 		moduleStates:    make(map[string]*moduleState),
+		moduleLocks:     make(map[string]*sync.Mutex),
 		moduleSnapshots: make(map[string]moduleSnapshot),
+		subSnapshots:    make(map[string]moduleSnapshot),
 		now:             time.Now,
 		retryBase:       initialRetryDelay,
 		jitter: func(delay time.Duration) time.Duration {
 			return time.Duration(float64(delay) * (0.8 + rand.Float64()*0.4))
 		},
 
-		up:                   g("up", "Whether the last Commvault background refresh completed without collector errors.", nil),
-		refreshDuration:      g("refresh_duration_seconds", "Duration of the last Commvault background refresh.", nil),
-		refreshTotal:         c("refresh_total", "Total Commvault background refresh attempts.", nil),
-		refreshErrorsTotal:   c("refresh_errors_total", "Total Commvault background refresh failures.", nil),
-		collectorUp:          g("collector_up", "Whether the named Commvault collector completed successfully during the last refresh.", []string{"collector"}),
-		subcollectorUp:       g("subcollector_up", "Whether the named Commvault subcollector completed successfully during the last refresh.", []string{"collector", "subcollector"}),
-		cacheLastAttempt:     g("cache_last_attempt_timestamp_seconds", "Unix timestamp of the last Commvault cache refresh attempt.", nil),
-		cacheLastSuccess:     g("cache_last_success_timestamp_seconds", "Unix timestamp of the oldest successful required collector snapshot.", nil),
-		cacheAge:             g("cache_age_seconds", "Age of the oldest required collector snapshot currently served.", nil),
-		cacheStale:           g("cache_stale", "1 when a required collector snapshot is stale or missing.", nil),
-		refreshConsecutive:   g("refresh_consecutive_errors", "Number of consecutive background refresh cycles with collector errors.", nil),
-		refreshInProgress:    g("refresh_in_progress", "1 while a background refresh cycle is running.", nil),
-		refreshNextAttempt:   g("refresh_next_attempt_timestamp_seconds", "Unix timestamp of the next scheduled background refresh attempt; 0 while refreshing or stopped.", nil),
-		collectorDuration:    g("collector_duration_seconds", "Duration of the latest collector attempt.", []string{"collector"}),
-		collectorLastSuccess: g("collector_last_success_timestamp_seconds", "Unix timestamp of the latest successful collector snapshot.", []string{"collector"}),
-		collectorCacheAge:    g("collector_cache_age_seconds", "Age of the latest successful collector snapshot.", []string{"collector"}),
-		collectorCacheStale:  g("collector_cache_stale", "1 when the collector snapshot is stale or missing.", []string{"collector"}),
+		up:                      g("up", "Whether every enabled Commvault collector has completed its latest attempt successfully.", nil),
+		refreshDuration:         g("refresh_duration_seconds", "Duration of the last Commvault background refresh.", nil),
+		refreshTotal:            c("refresh_total", "Total Commvault background refresh attempts.", nil),
+		refreshErrorsTotal:      c("refresh_errors_total", "Total Commvault background refresh failures.", nil),
+		collectorUp:             g("collector_up", "Whether the named Commvault collector completed successfully during the last refresh.", []string{"collector"}),
+		subcollectorUp:          g("subcollector_up", "Whether the named Commvault subcollector completed successfully during the last refresh.", []string{"collector", "subcollector"}),
+		subcollectorCacheStale:  g("subcollector_cache_stale", "1 when the subcollector snapshot is stale or missing.", []string{"collector", "subcollector"}),
+		subcollectorLastSuccess: g("subcollector_last_success_timestamp_seconds", "Unix timestamp of the latest successful subcollector snapshot; 0 before success.", []string{"collector", "subcollector"}),
+		cacheLastAttempt:        g("cache_last_attempt_timestamp_seconds", "Unix timestamp of the last Commvault cache refresh attempt.", nil),
+		cacheLastSuccess:        g("cache_last_success_timestamp_seconds", "Unix timestamp of the oldest successful required collector snapshot.", nil),
+		cacheAge:                g("cache_age_seconds", "Age of the oldest required collector snapshot currently served.", nil),
+		cacheStale:              g("cache_stale", "1 when a required collector snapshot is stale or missing.", nil),
+		refreshConsecutive:      g("refresh_consecutive_errors", "Number of consecutive background refresh cycles with collector errors.", nil),
+		refreshInProgress:       g("refresh_in_progress", "1 while a background refresh cycle is running.", nil),
+		refreshNextAttempt:      g("refresh_next_attempt_timestamp_seconds", "Unix timestamp of the next scheduled background refresh attempt; 0 while refreshing or stopped.", nil),
+		collectorDuration:       g("collector_duration_seconds", "Duration of the latest collector attempt.", []string{"collector"}),
+		collectorLastSuccess:    g("collector_last_success_timestamp_seconds", "Unix timestamp of the latest successful collector snapshot.", []string{"collector"}),
+		collectorCacheAge:       g("collector_cache_age_seconds", "Age of the latest successful collector snapshot.", []string{"collector"}),
+		collectorCacheStale:     g("collector_cache_stale", "1 when the collector snapshot is stale or missing.", []string{"collector"}),
 	}
 	data := newDataMetrics(cfg)
 	e.dataTemplate = data
@@ -234,6 +259,12 @@ func New(cfg config.Config, client *commvault.Client, logger *slog.Logger) *Expo
 	e.refreshConsecutive.With(e.baseLabels()).Set(0)
 	e.refreshInProgress.With(e.baseLabels()).Set(0)
 	e.refreshNextAttempt.With(e.baseLabels()).Set(0)
+	for _, name := range moduleNames {
+		e.moduleLocks[name] = &sync.Mutex{}
+		if !cfg.IsModuleDisabled(name) {
+			e.collectorUp.With(e.baseLabels("collector", name)).Set(0)
+		}
+	}
 	return e
 }
 
@@ -249,6 +280,18 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 	e.updateDynamicCacheMetricsLocked(now)
 	collectors := e.statusCollectors()
 	for _, module := range moduleNames {
+		if e.cfg.IsModuleDisabled(module) {
+			continue
+		}
+		if subs := e.subcollectorNames(module); len(subs) > 0 {
+			for _, sub := range subs {
+				snapshot, ok := e.subSnapshots[module+"/"+sub]
+				if ok && now.Sub(snapshot.Published) <= e.cfg.MaxStale {
+					collectors = append(collectors, snapshot.Collectors...)
+				}
+			}
+			continue
+		}
 		snapshot, ok := e.moduleSnapshots[module]
 		if ok && now.Sub(snapshot.Published) <= e.cfg.MaxStale {
 			collectors = append(collectors, snapshot.Collectors...)
@@ -266,12 +309,24 @@ func (e *Exporter) Start(ctx context.Context) {
 	}
 	e.startOnce.Do(func() {
 		runCtx, cancel := context.WithCancel(ctx)
+		e.cacheMu.Lock()
+		if e.stopped {
+			e.cacheMu.Unlock()
+			cancel()
+			return
+		}
 		e.schedulerCancel = cancel
+		e.schedulerContext = runCtx
+		e.cacheMu.Unlock()
 		go e.schedulerLoop(runCtx)
 	})
 }
 
 func (e *Exporter) Stop() {
+	e.cacheMu.Lock()
+	defer e.cacheMu.Unlock()
+	e.stopped = true
+	e.updateNextAttemptLocked()
 	if e.schedulerCancel != nil {
 		e.schedulerCancel()
 	}
@@ -280,49 +335,40 @@ func (e *Exporter) Stop() {
 func (e *Exporter) RefreshOnce(ctx context.Context) error {
 	e.refreshMu.Lock()
 	defer e.refreshMu.Unlock()
+	return e.refreshModules(ctx, moduleNames)
+}
+
+func (e *Exporter) refreshModules(ctx context.Context, names []string) error {
 	if ctx == nil {
 		ctx = context.Background()
-	}
-	if e.cfg.RefreshTimeout > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, e.cfg.RefreshTimeout)
-		defer cancel()
 	}
 	start := e.now()
 	e.cacheMu.Lock()
 	e.cacheLastAttempt.With(e.baseLabels()).Set(float64(start.Unix()))
 	e.refreshTotal.With(e.baseLabels()).Inc()
+	e.activeCycles++
 	e.refreshInProgress.With(e.baseLabels()).Set(1)
+	e.nextAttempt = time.Time{}
 	e.refreshNextAttempt.With(e.baseLabels()).Set(0)
 	e.cacheMu.Unlock()
 
-	staging := newDataMetrics(e.cfg)
-	e.useDataMetrics(staging)
-	type moduleSpec struct {
-		name string
-		fn   func(context.Context) error
-	}
-	specs := []moduleSpec{
-		{name: "vm", fn: e.collectVMs},
-		{name: "dashboard", fn: e.collectDashboard},
-		{name: "jobs", fn: e.collectJobs},
-		{name: "alerts", fn: e.collectAlerts},
-		{name: "events", fn: e.collectEvents},
-		{name: "storage", fn: e.collectStorage},
-		{name: "licensing", fn: e.collectLicensing},
-	}
-	results := make(chan bool, len(specs))
+	results := make(chan bool, len(names))
 	var wg sync.WaitGroup
 	enabled := 0
-	for _, spec := range specs {
-		if e.cfg.IsModuleDisabled(spec.name) {
+	for _, name := range names {
+		if e.cfg.IsModuleDisabled(name) {
 			continue
 		}
 		enabled++
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			results <- e.runModule(ctx, spec.name, spec.fn, staging.moduleCollectors(spec.name))
+			moduleCtx, cancel := context.WithTimeout(ctx, e.cfg.RefreshTimeout)
+			defer cancel()
+			worker := &Exporter{cfg: e.cfg, client: e.client, logger: e.logger, labelKeys: e.labelKeys, owner: e, now: e.now}
+			staging := newDataMetrics(e.cfg)
+			worker.useDataMetrics(staging)
+			results <- e.runModule(moduleCtx, name, worker.moduleFunction(name), staging.moduleCollectors(name))
 		}()
 	}
 	wg.Wait()
@@ -335,8 +381,10 @@ func (e *Exporter) RefreshOnce(ctx context.Context) error {
 	e.cacheMu.Lock()
 	defer e.cacheMu.Unlock()
 	e.hasRefresh = true
+	e.activeCycles--
+	e.updateNextAttemptLocked()
 	e.refreshDuration.With(e.baseLabels()).Set(duration.Seconds())
-	e.refreshInProgress.With(e.baseLabels()).Set(0)
+	e.refreshInProgress.With(e.baseLabels()).Set(boolFloat(e.activeCycles > 0))
 	if enabled == 0 {
 		failed = false
 	}
@@ -347,7 +395,7 @@ func (e *Exporter) RefreshOnce(ctx context.Context) error {
 		e.refreshConsecutive.With(e.baseLabels()).Set(float64(e.consecutiveErrs))
 		return fmt.Errorf("one or more collectors failed")
 	}
-	e.up.With(e.baseLabels()).Set(1)
+	e.updateUpLocked()
 	e.consecutiveErrs = 0
 	e.lastCompleteSuccess = e.now()
 	e.refreshConsecutive.With(e.baseLabels()).Set(0)
@@ -372,42 +420,51 @@ func (e *Exporter) DebugCacheHandler(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (e *Exporter) schedulerLoop(ctx context.Context) {
-	delay := time.Duration(0)
-	for {
-		if delay > 0 {
-			e.setNextAttempt(e.now().Add(delay))
-			timer := time.NewTimer(delay)
-			select {
-			case <-ctx.Done():
-				if !timer.Stop() {
-					<-timer.C
-				}
-				e.setNextAttempt(time.Time{})
-				return
-			case <-timer.C:
-			}
-		}
-		e.setNextAttempt(time.Time{})
-		err := e.RefreshOnce(ctx)
-		if ctx.Err() != nil {
-			e.setNextAttempt(time.Time{})
-			return
-		}
-		if err != nil {
-			if e.logger != nil {
-				e.logger.Error("refresh failed", "err", err)
-			}
-			delay = e.retryDelay()
+	var workers sync.WaitGroup
+	for _, name := range moduleNames {
+		if e.cfg.IsModuleDisabled(name) {
 			continue
 		}
-		delay = e.cfg.RefreshInterval
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for ctx.Err() == nil {
+				_ = e.refreshModules(ctx, []string{name})
+				e.cacheMu.Lock()
+				next := e.moduleStateLocked(name).NextAttempt
+				e.cacheMu.Unlock()
+				timer := time.NewTimer(max(next.Sub(e.now()), 0))
+				select {
+				case <-ctx.Done():
+					timer.Stop()
+					return
+				case <-timer.C:
+				}
+			}
+		}()
 	}
+	workers.Wait()
+	e.setNextAttempt(time.Time{})
 }
 
-func (e *Exporter) retryDelay() time.Duration {
-	e.cacheMu.Lock()
-	consecutive := e.consecutiveErrs
-	e.cacheMu.Unlock()
+func (e *Exporter) updateNextAttemptLocked() {
+	var next time.Time
+	if e.activeCycles == 0 && !e.stopped && (e.schedulerContext == nil || e.schedulerContext.Err() == nil) {
+		for _, name := range moduleNames {
+			if e.cfg.IsModuleDisabled(name) {
+				continue
+			}
+			attempt := e.moduleStateLocked(name).NextAttempt
+			if !attempt.IsZero() && (next.IsZero() || attempt.Before(next)) {
+				next = attempt
+			}
+		}
+	}
+	e.nextAttempt = next
+	e.refreshNextAttempt.With(e.baseLabels()).Set(float64(unixOrZero(next)))
+}
+
+func (e *Exporter) retryDelay(consecutive int) time.Duration {
 	delay := e.retryBase
 	for i := 1; i < consecutive && delay < e.cfg.RefreshInterval; i++ {
 		if delay >= e.cfg.RefreshInterval/2 {
@@ -416,14 +473,40 @@ func (e *Exporter) retryDelay() time.Duration {
 		}
 		delay *= 2
 	}
-	if delay > e.cfg.RefreshInterval {
-		delay = e.cfg.RefreshInterval
+	return min(e.jitter(min(delay, e.cfg.RefreshInterval)), e.cfg.RefreshInterval)
+}
+
+func (e *Exporter) moduleFunction(name string) func(context.Context) error {
+	switch name {
+	case "vm":
+		return e.collectVMs
+	case "dashboard":
+		return e.collectDashboard
+	case "jobs":
+		return e.collectJobs
+	case "alerts":
+		return e.collectAlerts
+	case "events":
+		return e.collectEvents
+	case "storage":
+		return e.collectStorage
+	case "licensing":
+		return e.collectLicensing
+	default:
+		panic("unknown collector: " + name)
 	}
-	delay = e.jitter(delay)
-	if delay > e.cfg.RefreshInterval {
-		return e.cfg.RefreshInterval
+}
+
+func (e *Exporter) updateUpLocked() {
+	up := true
+	for _, name := range moduleNames {
+		if e.cfg.IsModuleDisabled(name) {
+			continue
+		}
+		state := e.moduleStateLocked(name)
+		up = up && !state.LastSuccess.IsZero() && state.LastError == ""
 	}
-	return delay
+	e.up.With(e.baseLabels()).Set(boolFloat(up))
 }
 
 func (e *Exporter) setNextAttempt(next time.Time) {
@@ -438,11 +521,14 @@ func (e *Exporter) setNextAttempt(next time.Time) {
 }
 
 func (e *Exporter) runModule(ctx context.Context, name string, fn func(context.Context) error, collectors []prometheus.Collector) bool {
+	e.moduleLocks[name].Lock()
+	defer e.moduleLocks[name].Unlock()
 	start := e.now()
 	e.cacheMu.Lock()
 	state := e.moduleStateLocked(name)
 	state.Attempts++
 	state.LastAttempt = start
+	state.NextAttempt = time.Time{}
 	e.cacheMu.Unlock()
 	err := fn(ctx)
 	e.cacheMu.Lock()
@@ -451,6 +537,12 @@ func (e *Exporter) runModule(ctx context.Context, name string, fn func(context.C
 	e.collectorDuration.With(e.baseLabels("collector", name)).Set(state.LastDuration.Seconds())
 	if err != nil {
 		state.Errors++
+		state.ConsecutiveErrors++
+		delay := e.cfg.RefreshInterval
+		if commvault.IsTransient(err) {
+			delay = e.retryDelay(state.ConsecutiveErrors)
+		}
+		state.NextAttempt = e.now().Add(max(delay, commvault.RetryAfter(err)))
 		state.LastError = err.Error()
 		e.collectorUp.With(e.baseLabels("collector", name)).Set(0)
 		if e.logger != nil {
@@ -458,6 +550,8 @@ func (e *Exporter) runModule(ctx context.Context, name string, fn func(context.C
 		}
 		return false
 	}
+	state.ConsecutiveErrors = 0
+	state.NextAttempt = e.now().Add(e.cfg.RefreshInterval)
 	state.LastSuccess = e.now()
 	state.LastError = ""
 	e.collectorUp.With(e.baseLabels("collector", name)).Set(1)
@@ -467,17 +561,26 @@ func (e *Exporter) runModule(ctx context.Context, name string, fn func(context.C
 }
 
 func (e *Exporter) runSubcollector(ctx context.Context, collector, subcollector string, fn func(context.Context) error) error {
+	owner := e.owner
+	if owner == nil {
+		owner = e
+	}
+	// Each subcollector owns its metric vectors. In particular, licensing reports
+	// share metric names but must never mutate another report's published snapshot.
+	data := newDataMetrics(e.cfg)
+	e.useDataMetrics(data)
 	err := fn(ctx)
-	e.cacheMu.Lock()
-	defer e.cacheMu.Unlock()
+	owner.cacheMu.Lock()
+	defer owner.cacheMu.Unlock()
+	labels := owner.baseLabels("collector", collector, "subcollector", subcollector)
+	owner.subcollectorUp.With(labels).Set(boolFloat(err == nil))
 	if err != nil {
-		e.subcollectorUp.With(e.baseLabels("collector", collector, "subcollector", subcollector)).Set(0)
-		if e.logger != nil {
-			e.logger.Error("subcollector failed", "collector", collector, "subcollector", subcollector, "err", err)
+		if owner.logger != nil {
+			owner.logger.Error("subcollector failed", "collector", collector, "subcollector", subcollector, "err", err)
 		}
 		return err
 	}
-	e.subcollectorUp.With(e.baseLabels("collector", collector, "subcollector", subcollector)).Set(1)
+	owner.subSnapshots[collector+"/"+subcollector] = moduleSnapshot{Collectors: data.subcollectorCollectors(collector, subcollector), Published: owner.now()}
 	return nil
 }
 
@@ -494,7 +597,8 @@ func (e *Exporter) cacheStatus(now time.Time) cacheStatus {
 	e.cacheMu.Lock()
 	defer e.cacheMu.Unlock()
 	e.updateDynamicCacheMetricsLocked(now)
-	ready, lastSuccess, age, stale := e.readinessLocked(now)
+	cacheReady, lastSuccess, age, stale := e.freshnessLocked(now)
+	ready := !e.stopped && (e.schedulerContext == nil || e.schedulerContext.Err() == nil)
 	lastAttempt := gaugeValue(e.cacheLastAttempt.With(e.baseLabels()))
 	required := e.requiredModules()
 	modules := make([]cacheModuleStatus, 0, len(moduleNames))
@@ -517,6 +621,8 @@ func (e *Exporter) cacheStatus(now time.Time) cacheStatus {
 			successUnix = state.LastSuccess.Unix()
 		}
 		modules = append(modules, cacheModuleStatus{
+			NextAttemptUnix:     unixOrZero(state.NextAttempt),
+			ConsecutiveErrors:   state.ConsecutiveErrors,
 			Module:              name,
 			LastAttemptUnix:     attemptUnix,
 			LastSuccessUnix:     successUnix,
@@ -540,6 +646,8 @@ func (e *Exporter) cacheStatus(now time.Time) cacheStatus {
 	}
 	return cacheStatus{
 		Ready:             ready,
+		CacheReady:        cacheReady,
+		Subcollectors:     e.subcollectorStatusLocked(now),
 		LastAttemptUnix:   int64(lastAttempt),
 		LastSuccessUnix:   lastSuccessUnix,
 		AgeSeconds:        age,
@@ -552,7 +660,7 @@ func (e *Exporter) cacheStatus(now time.Time) cacheStatus {
 }
 
 func (e *Exporter) updateDynamicCacheMetricsLocked(now time.Time) {
-	_, lastSuccess, age, stale := e.readinessLocked(now)
+	_, lastSuccess, age, stale := e.freshnessLocked(now)
 	lastSuccessValue := float64(0)
 	if !lastSuccess.IsZero() {
 		lastSuccessValue = float64(lastSuccess.Unix())
@@ -572,11 +680,17 @@ func (e *Exporter) updateDynamicCacheMetricsLocked(now time.Time) {
 			moduleStale = moduleAge > e.cfg.MaxStale.Seconds()
 		}
 		e.collectorCacheAge.With(e.baseLabels("collector", name)).Set(moduleAge)
+		for _, sub := range e.subcollectorNames(name) {
+			snapshot, ok := e.subSnapshots[name+"/"+sub]
+			labels := e.baseLabels("collector", name, "subcollector", sub)
+			e.subcollectorCacheStale.With(labels).Set(boolFloat(!ok || now.Sub(snapshot.Published) > e.cfg.MaxStale))
+			e.subcollectorLastSuccess.With(labels).Set(float64(unixOrZero(snapshot.Published)))
+		}
 		e.collectorCacheStale.With(e.baseLabels("collector", name)).Set(boolFloat(moduleStale))
 	}
 }
 
-func (e *Exporter) readinessLocked(now time.Time) (bool, time.Time, float64, bool) {
+func (e *Exporter) freshnessLocked(now time.Time) (bool, time.Time, float64, bool) {
 	required := e.requiredModules()
 	if len(required) == 0 {
 		if !e.hasRefresh || e.lastCompleteSuccess.IsZero() {
@@ -620,6 +734,7 @@ func (e *Exporter) requiredModules() map[string]bool {
 
 func (e *Exporter) statusCollectors() []prometheus.Collector {
 	return []prometheus.Collector{
+		e.subcollectorCacheStale, e.subcollectorLastSuccess,
 		e.up, e.refreshDuration, e.refreshTotal, e.refreshErrorsTotal, e.collectorUp, e.subcollectorUp,
 		e.cacheLastAttempt, e.cacheLastSuccess, e.cacheAge, e.cacheStale,
 		e.refreshConsecutive, e.refreshInProgress, e.refreshNextAttempt,
